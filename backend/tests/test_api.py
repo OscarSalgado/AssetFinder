@@ -464,3 +464,110 @@ class TestAPIErrorHandling:
         assert status_code == 500
         assert "error" in data
         assert data["code"] == "INTERNAL_ERROR"
+
+    def test_sync_endpoint_exception_handling(self, client_with_mock_db):
+        """Test that sync endpoint handles exceptions"""
+        client, app, api_module = client_with_mock_db
+
+        with patch.object(api_module.scraper, "sync_assets") as mock_sync:
+            mock_sync.side_effect = Exception("Sync error")
+
+            response = client.post("/api/sync")
+            assert response.status_code == 500
+
+            data = response.get_json()
+            assert "error" in data
+            assert data["code"] == "SYNC_ERROR"
+
+
+class TestSyncEndpoint:
+    """Test /api/sync endpoint"""
+
+    def test_sync_endpoint_exists(self, client):
+        """Test that sync endpoint exists"""
+        response = client.post("/api/sync")
+        assert response.status_code == 200
+
+    def test_sync_endpoint_success(self, client):
+        """Test sync endpoint returns success response"""
+        response = client.post("/api/sync")
+        assert response.status_code == 200
+
+        data = response.get_json()
+        assert "message" in data
+        assert "count" in data
+        assert "timestamp" in data
+
+    def test_sync_endpoint_returns_count(self, client):
+        """Test that sync returns count of synced assets"""
+        response = client.post("/api/sync")
+        data = response.get_json()
+
+        assert isinstance(data["count"], int)
+        assert data["count"] >= 0
+
+    def test_sync_endpoint_populates_database(self, client, temp_db):
+        """Test that sync populates database"""
+        from src.api import app, db
+
+        response = client.post("/api/sync")
+        assert response.status_code == 200
+
+        count = db.get_asset_count()
+        assert count > 0
+
+    def test_sync_endpoint_response_structure(self, client):
+        """Test sync response structure"""
+        response = client.post("/api/sync")
+        data = response.get_json()
+
+        assert response.content_type == "application/json"
+        assert "message" in data
+        assert "count" in data
+        assert "timestamp" in data
+        assert "error" not in data
+
+
+class TestDatabaseInitialization:
+    """Test database initialization on startup"""
+
+    def test_first_search_initializes_database(self, client):
+        """Test that first search initializes database if empty"""
+        response = client.get("/api/search")
+        assert response.status_code == 200
+
+        data = response.get_json()
+        assert data["total"] > 0
+
+    def test_database_populated_after_first_request(self, client, temp_db):
+        """Test database is populated after first request"""
+        from src.api import app, db
+
+        client.get("/api/search")
+
+        assert db.get_asset_count() > 0
+
+    def test_subsequent_requests_use_cached_data(self, client):
+        """Test that subsequent requests use cached database data"""
+        response1 = client.get("/api/search")
+        data1 = response1.get_json()
+
+        response2 = client.get("/api/search")
+        data2 = response2.get_json()
+
+        assert data1["total"] == data2["total"]
+        assert len(data1["assets"]) == len(data2["assets"])
+
+    def test_initialization_skipped_when_database_populated(self, client):
+        """Test that initialization is skipped if database already has data"""
+        from src.api import app, db
+
+        response1 = client.get("/api/search")
+        data1 = response1.get_json()
+        count1 = data1["total"]
+
+        response2 = client.get("/api/search")
+        data2 = response2.get_json()
+        count2 = data2["total"]
+
+        assert count1 == count2

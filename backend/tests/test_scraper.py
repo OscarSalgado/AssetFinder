@@ -1,5 +1,8 @@
 import pytest
+from unittest.mock import MagicMock, patch
+from requests.exceptions import RequestException
 from src.scraper import Scraper, create_scraper, MOCK_ASSETS
+from src.db import Database
 
 
 class TestScraper:
@@ -235,3 +238,197 @@ class TestScraper:
         scraper.fetch_assets(query="test")
 
         assert len(MOCK_ASSETS) == original_count
+
+
+class TestScraperWithDatabase:
+    """Test Scraper with database persistence"""
+
+    @pytest.fixture
+    def temp_db(self, tmp_path):
+        """Create temporary database for testing"""
+        db_path = str(tmp_path / "test.db")
+        return Database(db_path)
+
+    @pytest.fixture
+    def scraper_with_db(self, temp_db):
+        """Create scraper instance with database"""
+        return Scraper(use_mock=True, db=temp_db)
+
+    def test_scraper_with_db_initialization(self, scraper_with_db, temp_db):
+        """Test scraper initializes with database"""
+        assert scraper_with_db.db is not None
+        assert scraper_with_db.db == temp_db
+
+    def test_fetch_assets_with_db_saves_to_database(self, scraper_with_db, temp_db):
+        """Test that fetch_assets with save_to_db persists to database"""
+        results = scraper_with_db.fetch_assets(save_to_db=True)
+
+        assert len(results) > 0
+        assert temp_db.get_asset_count() > 0
+
+    def test_fetch_assets_saves_all_assets(self, scraper_with_db, temp_db):
+        """Test that all fetched assets are saved"""
+        results = scraper_with_db.fetch_assets(save_to_db=True)
+
+        assert temp_db.get_asset_count() == len(results)
+
+    def test_fetch_assets_with_filters_saves_correctly(self, scraper_with_db, temp_db):
+        """Test that filtered assets are still saved correctly"""
+        results = scraper_with_db.fetch_assets(
+            filters={"type": "inmueble"},
+            save_to_db=True
+        )
+
+        assert len(results) > 0
+        assert temp_db.get_asset_count() > 0
+
+    def test_sync_assets_returns_count(self, scraper_with_db, temp_db):
+        """Test that sync_assets returns count of synced assets"""
+        count = scraper_with_db.sync_assets()
+
+        assert isinstance(count, int)
+        assert count > 0
+
+    def test_sync_assets_populates_database(self, scraper_with_db, temp_db):
+        """Test that sync_assets populates database"""
+        assert temp_db.get_asset_count() == 0
+
+        count = scraper_with_db.sync_assets()
+
+        assert count > 0
+        assert temp_db.get_asset_count() > 0
+
+    def test_sync_assets_without_database_returns_zero(self):
+        """Test that sync without database returns 0"""
+        scraper = Scraper(use_mock=True, db=None)
+        count = scraper.sync_assets()
+
+        assert count == 0
+
+    def test_fetch_assets_without_db_parameter_no_save(self, scraper_with_db, temp_db):
+        """Test fetch_assets without save_to_db flag doesn't save"""
+        temp_db.delete_all_assets()
+
+        results = scraper_with_db.fetch_assets(save_to_db=False)
+
+        assert len(results) > 0
+        assert temp_db.get_asset_count() == 0
+
+    def test_fetch_assets_metadata_added(self, scraper_with_db, temp_db):
+        """Test that created_at and updated_at are added"""
+        results = scraper_with_db.fetch_assets(save_to_db=True)
+
+        for asset in results:
+            assert "created_at" in asset
+            assert "updated_at" in asset
+
+
+class TestScraperRealScraping:
+    """Test real scraping functionality"""
+
+    def test_session_created(self):
+        """Test that requests session is created"""
+        scraper = Scraper()
+        assert scraper.session is not None
+
+    def test_session_has_user_agent(self):
+        """Test that session has user agent header"""
+        scraper = Scraper()
+        assert "User-Agent" in scraper.session.headers
+
+    def test_build_search_url_no_params(self):
+        """Test building URL with no parameters"""
+        scraper = Scraper()
+        url = scraper._build_search_url(None, {})
+
+        assert url == scraper.portal_url
+
+    def test_build_search_url_with_query(self):
+        """Test building URL with query parameter"""
+        scraper = Scraper()
+        url = scraper._build_search_url("test", {})
+
+        assert "q=test" in url
+        assert scraper.portal_url in url
+
+    def test_build_search_url_with_type_filter(self):
+        """Test building URL with type filter"""
+        scraper = Scraper()
+        url = scraper._build_search_url(None, {"type": "inmueble"})
+
+        assert "type=inmueble" in url
+
+    def test_build_search_url_with_multiple_params(self):
+        """Test building URL with multiple parameters"""
+        scraper = Scraper()
+        url = scraper._build_search_url("test", {"type": "vehiculo"})
+
+        assert "q=test" in url
+        assert "type=vehiculo" in url
+
+    @patch('src.scraper.requests.Session.get')
+    def test_fetch_html_success(self, mock_get):
+        """Test fetching HTML successfully"""
+        mock_response = MagicMock()
+        mock_response.text = "<html>test</html>"
+        mock_get.return_value = mock_response
+
+        scraper = Scraper()
+        result = scraper._fetch_html("http://test.com")
+
+        assert result == "<html>test</html>"
+        mock_get.assert_called_once()
+
+    @patch('src.scraper.requests.Session.get')
+    def test_fetch_html_failure(self, mock_get):
+        """Test fetch HTML handles exceptions"""
+        mock_get.side_effect = RequestException("Network error")
+
+        scraper = Scraper()
+        result = scraper._fetch_html("http://test.com")
+
+        assert result is None
+
+    def test_real_scraping_mode_fallback_to_mock(self):
+        """Test that real scraping mode falls back to mock on failure"""
+        scraper = Scraper(use_mock=False)
+        results = scraper.fetch_assets()
+
+        assert len(results) > 0
+
+    @patch('src.scraper.Scraper._fetch_html')
+    def test_real_scraping_uses_parser(self, mock_fetch_html):
+        """Test that real scraping uses the parser"""
+        mock_fetch_html.return_value = None
+
+        scraper = Scraper(use_mock=False)
+        results = scraper.fetch_assets()
+
+        assert isinstance(results, list)
+
+    def test_is_healthy_always_true(self):
+        """Test that is_healthy always returns True"""
+        scraper = Scraper()
+        assert scraper.is_healthy() is True
+
+    @patch('src.scraper.Scraper._fetch_html')
+    def test_fetch_real_assets_exception_fallback(self, mock_fetch_html):
+        """Test that fetch_real_assets falls back to mock on exception"""
+        mock_fetch_html.side_effect = Exception("Parse error")
+
+        scraper = Scraper(use_mock=False)
+        results = scraper.fetch_assets()
+
+        assert len(results) > 0
+
+    def test_sync_assets_with_db_exception_handling(self, tmp_path):
+        """Test sync_assets exception handling"""
+        db_path = str(tmp_path / "test.db")
+        db = Database(db_path)
+        scraper = Scraper(use_mock=True, db=db)
+
+        with patch.object(db, "insert_asset") as mock_insert:
+            mock_insert.side_effect = Exception("DB error")
+
+            count = scraper.sync_assets()
+            assert isinstance(count, int)

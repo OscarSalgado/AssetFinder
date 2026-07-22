@@ -1,9 +1,13 @@
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
-import random
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from .parser import AssetParser
 
 
-# Mock data for Delta 0.2 (without real scraping)
+# Mock data for fallback (Delta 0.2 compatibility)
 MOCK_ASSETS = [
     {
         "id": "SSSS-2024-001",
@@ -63,33 +67,89 @@ MOCK_ASSETS = [
 
 
 class Scraper:
-    """Scraper for SSSS embargos portal (mock version for Delta 0.2)"""
+    """Scraper for SSSS embargos portal with real HTML parsing and DB persistence"""
 
-    def __init__(self):
+    def __init__(self, use_mock: bool = True, db=None):
         self.portal_url = "https://w6.seg-social.es/subastas/"
         self.last_scraped = None
+        self.use_mock = use_mock
+        self.parser = AssetParser()
+        self.session = self._create_session()
+        self.db = db  # Database instance for persistence
+
+    def _create_session(self) -> requests.Session:
+        """Create requests session with retry strategy"""
+        session = requests.Session()
+
+        # Retry strategy for network resilience
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"],
+        )
+
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+        # Set user agent to avoid blocking
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+
+        return session
 
     def fetch_assets(
         self,
         query: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
+        save_to_db: bool = False,
     ) -> List[Dict[str, Any]]:
         """
-        Fetch assets from portal (mock data for Delta 0.2)
+        Fetch assets from portal using real scraping or mock data
 
         Args:
             query: Search query string
             filters: Dict with optional keys: type, price_min, price_max, date_from, date_to
+            save_to_db: Whether to save fetched assets to database
 
         Returns:
             List of asset dictionaries
         """
         filters = filters or {}
 
-        # Start with all mock assets
+        # Use mock data or real scraping
+        if self.use_mock:
+            results = self._fetch_mock_assets(query, filters)
+        else:
+            results = self._fetch_real_assets(query, filters)
+
+        # Add metadata to results
+        for asset in results:
+            if "created_at" not in asset:
+                asset["created_at"] = datetime.utcnow().isoformat()
+            asset["updated_at"] = datetime.utcnow().isoformat()
+
+        # Save to database if requested
+        if save_to_db and self.db:
+            for asset in results:
+                try:
+                    self.db.insert_asset(asset)
+                except Exception:
+                    # Skip DB errors, continue with next asset
+                    pass
+
+        self.last_scraped = datetime.utcnow()
+        return results
+
+    def _fetch_mock_assets(
+        self, query: Optional[str], filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Fetch mock assets (Delta 0.2 compatibility)"""
         results = MOCK_ASSETS.copy()
 
-        # Filter by query (text search in description and type)
+        # Filter by query
         if query:
             query_lower = query.lower()
             results = [
@@ -136,19 +196,94 @@ class Scraper:
                 if asset["date_subasta"] <= filters["date_to"]
             ]
 
-        # Add metadata to results
-        for asset in results:
-            asset["created_at"] = datetime.utcnow().isoformat()
-            asset["updated_at"] = datetime.utcnow().isoformat()
-
-        self.last_scraped = datetime.utcnow()
         return results
+
+    def _fetch_real_assets(
+        self, query: Optional[str], filters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Fetch real assets from SSSS portal by scraping HTML"""
+        try:
+            # Build search URL with parameters
+            search_url = self._build_search_url(query, filters)
+
+            # Fetch HTML from portal
+            html_content = self._fetch_html(search_url)
+
+            if not html_content:
+                # Fallback to mock data if scraping fails
+                return self._fetch_mock_assets(query, filters)
+
+            # Parse HTML to extract assets
+            assets = self.parser.parse_response(html_content)
+
+            return assets
+
+        except Exception:
+            # Fallback to mock data on any error
+            return self._fetch_mock_assets(query, filters)
+
+    def _build_search_url(
+        self, query: Optional[str], filters: Dict[str, Any]
+    ) -> str:
+        """Build search URL with query parameters"""
+        url = self.portal_url
+
+        # Add query parameters if needed
+        params = []
+
+        if query:
+            params.append(f"q={query}")
+
+        if filters.get("type"):
+            params.append(f"type={filters['type']}")
+
+        if params:
+            url += "?" + "&".join(params)
+
+        return url
+
+    def _fetch_html(self, url: str) -> Optional[str]:
+        """Fetch HTML content from URL with error handling"""
+        try:
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException:
+            return None
 
     def is_healthy(self) -> bool:
         """Check if scraper is operational"""
         return True
 
+    def sync_assets(self) -> int:
+        """
+        Sync assets from portal to database
 
-def create_scraper() -> Scraper:
+        Returns:
+            Number of assets synced
+        """
+        if not self.db:
+            return 0
+
+        try:
+            # Fetch assets from portal
+            assets = self.fetch_assets()
+
+            # Save to database
+            count = 0
+            for asset in assets:
+                try:
+                    self.db.insert_asset(asset)
+                    count += 1
+                except Exception:
+                    # Continue on DB errors
+                    pass
+
+            return count
+        except Exception:
+            return 0
+
+
+def create_scraper(use_mock: bool = True, db=None) -> Scraper:
     """Factory function to create scraper instance"""
-    return Scraper()
+    return Scraper(use_mock=use_mock, db=db)

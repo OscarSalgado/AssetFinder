@@ -12,13 +12,20 @@ app.config["JSON_SORT_KEYS"] = False
 
 # Initialize database and scraper
 db = Database()
-scraper = create_scraper()
+scraper = create_scraper(use_mock=True, db=db)
+
+
+def _initialize_database():
+    """Populate database with initial assets if empty"""
+    if db.get_asset_count() == 0:
+        scraper.fetch_assets(save_to_db=True)
 
 
 @app.before_request
 def before_request():
     """Ensure database and scraper are initialized"""
-    pass
+    if db.get_asset_count() == 0:
+        _initialize_database()
 
 
 @app.route("/api/health", methods=["GET"])
@@ -146,6 +153,29 @@ def get_asset(asset_id: str) -> Tuple[dict, int]:
         )
 
 
+@app.route("/api/sync", methods=["POST"])
+def sync_assets() -> Tuple[dict, int]:
+    """Sync assets from portal to database"""
+    try:
+        count = scraper.sync_assets()
+        return (
+            {
+                "message": f"Synced {count} assets",
+                "count": count,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+            200,
+        )
+    except Exception as e:
+        return (
+            {
+                "error": str(e),
+                "code": "SYNC_ERROR",
+            },
+            500,
+        )
+
+
 @app.route("/api/search-history", methods=["GET"])
 def get_search_history() -> Tuple[dict, int]:
     """Get search history"""
@@ -203,8 +233,9 @@ def internal_error(error):
 
 def create_app(db_path: str = "data/assetfinder.db"):
     """Factory function to create app with custom DB path (for testing)"""
-    global db
+    global db, scraper
     db = Database(db_path)
+    scraper = create_scraper(use_mock=True, db=db)
     return app
 
 
