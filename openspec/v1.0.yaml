@@ -1,11 +1,13 @@
 openspec: "1.0"
 metadata:
   name: AssetFinder
-  version: 1.0.0
+  version: 1.0.8
   description: "Buscador de bienes embargados en portal Seguridad Social española"
   portal_url: "https://w6.seg-social.es/subastas/"
   coverage_target: 100
   coverage_target_branches: 100
+  status: "Production-ready with security hardening"
+  last_delta_completed: 0.8
 
 dataModels:
   Asset:
@@ -298,6 +300,24 @@ deltas:
       - "Ordenamiento por precio, fecha"
       - "Exportación a CSV"
       - "Historial de búsquedas"
+
+  0.8:
+    title: "Security Hardening - Producción"
+    description: "Mejoras de seguridad para deployment en producción"
+    depends_on: ["0.7"]
+    changes:
+      - "Sanitización de mensajes de error (sin exposición de detalles internos)"
+      - "Logging de auditoría para todas las requests"
+      - "Headers de seguridad (HSTS, CSP, X-Frame-Options, X-XSS-Protection)"
+      - "Validación de longitud de query strings (máx 1000 caracteres)"
+      - "Límites de tamaño en endpoint export (máx 50,000 filas)"
+      - "Manejo robusto de excepciones en endpoints"
+      - "Prevención de exposición de paths en errores 404"
+      - "11 nuevos tests de security (validación, headers, sanitización)"
+    metrics:
+      test_count: 74
+      coverage: "96.14%"
+      api_tests_passing: "all"
 
 testCoverage:
   target: 100
