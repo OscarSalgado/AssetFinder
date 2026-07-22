@@ -3,9 +3,9 @@ export class SearchModule {
         this.apiBaseUrl = apiBaseUrl;
     }
 
-    async search(query = '', filters = {}, limit = 50, offset = 0) {
+    async search(query = '', filters = {}, limit = 50, offset = 0, sortBy = 'date_subasta', sortOrder = 'DESC') {
         try {
-            const queryParams = this.buildQueryParams(query, filters, limit, offset);
+            const queryParams = this.buildQueryParams(query, filters, limit, offset, sortBy, sortOrder);
             const url = `${this.apiBaseUrl}/search${queryParams}`;
 
             const response = await fetch(url, {
@@ -26,6 +26,8 @@ export class SearchModule {
                 total: data.total || 0,
                 limit: data.limit || limit,
                 offset: data.offset || offset,
+                sortBy: data.sort_by || sortBy,
+                sortOrder: data.sort_order || sortOrder,
                 timestamp: data.timestamp,
             };
         } catch (error) {
@@ -116,7 +118,7 @@ export class SearchModule {
         }
     }
 
-    buildQueryParams(query = '', filters = {}, limit = 50, offset = 0) {
+    buildQueryParams(query = '', filters = {}, limit = 50, offset = 0, sortBy = 'date_subasta', sortOrder = 'DESC') {
         const params = new URLSearchParams();
 
         if (query && query.trim()) {
@@ -145,6 +147,8 @@ export class SearchModule {
 
         params.append('limit', limit);
         params.append('offset', offset);
+        params.append('sort_by', sortBy);
+        params.append('sort_order', sortOrder);
 
         return params.toString() ? `?${params.toString()}` : '';
     }

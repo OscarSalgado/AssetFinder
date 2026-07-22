@@ -11,7 +11,10 @@ describe('SearchModule', () => {
     describe('buildQueryParams', () => {
         test('builds empty query params with no arguments', () => {
             const result = searchModule.buildQueryParams('', {});
-            expect(result).toBe('?limit=50&offset=0');
+            expect(result).toContain('limit=50');
+            expect(result).toContain('offset=0');
+            expect(result).toContain('sort_by=date_subasta');
+            expect(result).toContain('sort_order=DESC');
         });
 
         test('includes query parameter when provided', () => {
@@ -54,6 +57,18 @@ describe('SearchModule', () => {
             expect(result).not.toContain('price_min=');
             expect(result).not.toContain('price_max=');
         });
+
+        test('includes sort_by parameter', () => {
+            const result = searchModule.buildQueryParams('', {}, 50, 0, 'price_initial', 'ASC');
+            expect(result).toContain('sort_by=price_initial');
+            expect(result).toContain('sort_order=ASC');
+        });
+
+        test('defaults to date_subasta sort', () => {
+            const result = searchModule.buildQueryParams('', {});
+            expect(result).toContain('sort_by=date_subasta');
+            expect(result).toContain('sort_order=DESC');
+        });
     });
 
     describe('search', () => {
@@ -94,6 +109,8 @@ describe('SearchModule', () => {
                     total: 1,
                     limit: 50,
                     offset: 0,
+                    sort_by: 'date_subasta',
+                    sort_order: 'DESC',
                     timestamp: '2024-01-01T00:00:00Z',
                 }),
             });
@@ -102,6 +119,8 @@ describe('SearchModule', () => {
 
             expect(result.assets).toEqual(mockAssets);
             expect(result.total).toBe(1);
+            expect(result.sortBy).toBe('date_subasta');
+            expect(result.sortOrder).toBe('DESC');
         });
 
         test('throws error on failed API response', async () => {

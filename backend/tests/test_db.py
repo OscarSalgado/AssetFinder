@@ -399,6 +399,168 @@ class TestDatabase:
 
         assert len(results1) == len(results2)
 
+    def test_search_with_sort_by_price_asc(self, db):
+        """Test searching with ascending price sort"""
+        assets_data = [
+            {
+                "id": "ASSET-1",
+                "type": "inmueble",
+                "description": "Expensive property",
+                "price_initial": 500000,
+                "price_min": 400000,
+                "date_subasta": "2024-03-15",
+                "location": "Madrid",
+            },
+            {
+                "id": "ASSET-2",
+                "type": "inmueble",
+                "description": "Cheap property",
+                "price_initial": 100000,
+                "price_min": 80000,
+                "date_subasta": "2024-03-20",
+                "location": "Barcelona",
+            },
+        ]
+        for asset in assets_data:
+            db.insert_asset(asset)
+
+        results, _ = db.search_assets(sort_by="price_initial", sort_order="ASC")
+        assert len(results) == 2
+        assert results[0]["price_initial"] < results[1]["price_initial"]
+
+    def test_search_with_sort_by_price_desc(self, db):
+        """Test searching with descending price sort"""
+        assets_data = [
+            {
+                "id": "ASSET-1",
+                "type": "inmueble",
+                "description": "Expensive property",
+                "price_initial": 500000,
+                "price_min": 400000,
+                "date_subasta": "2024-03-15",
+                "location": "Madrid",
+            },
+            {
+                "id": "ASSET-2",
+                "type": "inmueble",
+                "description": "Cheap property",
+                "price_initial": 100000,
+                "price_min": 80000,
+                "date_subasta": "2024-03-20",
+                "location": "Barcelona",
+            },
+        ]
+        for asset in assets_data:
+            db.insert_asset(asset)
+
+        results, _ = db.search_assets(sort_by="price_initial", sort_order="DESC")
+        assert len(results) == 2
+        assert results[0]["price_initial"] > results[1]["price_initial"]
+
+    def test_search_with_sort_by_date(self, db):
+        """Test searching with date sort"""
+        assets_data = [
+            {
+                "id": "ASSET-1",
+                "type": "inmueble",
+                "description": "Early date",
+                "price_initial": 100000,
+                "price_min": 80000,
+                "date_subasta": "2024-01-15",
+                "location": "Madrid",
+            },
+            {
+                "id": "ASSET-2",
+                "type": "inmueble",
+                "description": "Late date",
+                "price_initial": 200000,
+                "price_min": 160000,
+                "date_subasta": "2024-12-15",
+                "location": "Barcelona",
+            },
+        ]
+        for asset in assets_data:
+            db.insert_asset(asset)
+
+        results, _ = db.search_assets(sort_by="date_subasta", sort_order="DESC")
+        assert len(results) == 2
+        assert results[0]["date_subasta"] > results[1]["date_subasta"]
+
+    def test_search_with_invalid_sort_field_defaults_to_date(self, db):
+        """Test that invalid sort fields default to date_subasta"""
+        asset = {
+            "id": "ASSET-1",
+            "type": "inmueble",
+            "description": "Test property",
+            "price_initial": 100000,
+            "price_min": 80000,
+            "date_subasta": "2024-03-15",
+            "location": "Madrid",
+        }
+        db.insert_asset(asset)
+
+        results, _ = db.search_assets(sort_by="invalid_field")
+        assert len(results) == 1
+
+    def test_search_with_invalid_sort_order_defaults_to_desc(self, db):
+        """Test that invalid sort order defaults to DESC"""
+        asset = {
+            "id": "ASSET-1",
+            "type": "inmueble",
+            "description": "Test property",
+            "price_initial": 100000,
+            "price_min": 80000,
+            "date_subasta": "2024-03-15",
+            "location": "Madrid",
+        }
+        db.insert_asset(asset)
+
+        results, _ = db.search_assets(sort_order="invalid_order")
+        assert len(results) == 1
+
+    def test_search_with_sort_preserves_filters(self, db):
+        """Test that sorting works correctly with filters"""
+        assets_data = [
+            {
+                "id": "ASSET-1",
+                "type": "inmueble",
+                "description": "Property 1",
+                "price_initial": 300000,
+                "price_min": 240000,
+                "date_subasta": "2024-03-15",
+                "location": "Madrid",
+            },
+            {
+                "id": "ASSET-2",
+                "type": "vehiculo",
+                "description": "Car 1",
+                "price_initial": 25000,
+                "price_min": 20000,
+                "date_subasta": "2024-03-20",
+                "location": "Barcelona",
+            },
+            {
+                "id": "ASSET-3",
+                "type": "inmueble",
+                "description": "Property 2",
+                "price_initial": 150000,
+                "price_min": 120000,
+                "date_subasta": "2024-03-25",
+                "location": "Valencia",
+            },
+        ]
+        for asset in assets_data:
+            db.insert_asset(asset)
+
+        filters = {"type": "inmueble"}
+        results, total = db.search_assets(
+            filters=filters, sort_by="price_initial", sort_order="ASC"
+        )
+        assert total == 2
+        assert len(results) == 2
+        assert all(r["type"] == "inmueble" for r in results)
+        assert results[0]["price_initial"] < results[1]["price_initial"]
+
 
 class TestDatabaseErrorHandling:
     """Test error handling in Database class"""

@@ -140,12 +140,22 @@ class Database:
         filters: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         offset: int = 0,
+        sort_by: str = "date_subasta",
+        sort_order: str = "DESC",
     ) -> tuple[List[Dict[str, Any]], int]:
-        """Search assets with optional filters and pagination"""
+        """Search assets with optional filters, pagination, and sorting"""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
             filters = filters or {}
+
+            valid_sort_fields = ["price_initial", "date_subasta", "id", "type"]
+            if sort_by not in valid_sort_fields:
+                sort_by = "date_subasta"
+
+            valid_sort_orders = ["ASC", "DESC"]
+            if sort_order.upper() not in valid_sort_orders:
+                sort_order = "DESC"
 
             # Base query
             where_clauses = []
@@ -186,11 +196,11 @@ class Database:
             cursor.execute(count_query, params)
             total = cursor.fetchone()[0]
 
-            # Fetch paginated results
+            # Fetch paginated results with sorting
             data_query = f"""
                 SELECT * FROM assets
                 WHERE {where_sql}
-                ORDER BY date_subasta DESC
+                ORDER BY {sort_by} {sort_order}
                 LIMIT ? OFFSET ?
             """
             cursor.execute(data_query, params + [limit, offset])

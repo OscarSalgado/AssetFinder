@@ -1,7 +1,9 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from datetime import datetime
 from typing import Tuple
 import os
+import csv
+import io
 
 from .db import Database
 from .scraper import create_scraper
@@ -54,6 +56,8 @@ def search_assets() -> Tuple[dict, int]:
     - price_max: Maximum price
     - date_from: Date range start (YYYY-MM-DD)
     - date_to: Date range end (YYYY-MM-DD)
+    - sort_by: Sort field (price_initial, date_subasta, id, type) (default: date_subasta)
+    - sort_order: Sort order (ASC, DESC) (default: DESC)
     - limit: Results per page (default: 50)
     - offset: Pagination offset (default: 0)
     """
@@ -62,6 +66,8 @@ def search_assets() -> Tuple[dict, int]:
         query = request.args.get("q", "").strip()
         limit = min(int(request.args.get("limit", 50)), 1000)
         offset = max(int(request.args.get("offset", 0)), 0)
+        sort_by = request.args.get("sort_by", "date_subasta")
+        sort_order = request.args.get("sort_order", "DESC").upper()
 
         # Build filters dict
         filters = {}
@@ -94,9 +100,14 @@ def search_assets() -> Tuple[dict, int]:
         if date_to := request.args.get("date_to"):
             filters["date_to"] = date_to
 
-        # Search in database
+        # Search in database with sorting
         assets, total = db.search_assets(
-            query=query or None, filters=filters or None, limit=limit, offset=offset
+            query=query or None,
+            filters=filters or None,
+            limit=limit,
+            offset=offset,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
 
         # Log search to history
@@ -108,6 +119,8 @@ def search_assets() -> Tuple[dict, int]:
                 "total": total,
                 "limit": limit,
                 "offset": offset,
+                "sort_by": sort_by,
+                "sort_order": sort_order,
                 "timestamp": datetime.utcnow().isoformat(),
             },
             200,
@@ -202,6 +215,97 @@ def get_search_history() -> Tuple[dict, int]:
                 "error": str(e),
                 "code": "HISTORY_ERROR",
             },
+            500,
+        )
+
+
+@app.route("/api/export", methods=["GET"])
+def export_assets() -> Tuple[Response, int]:
+    """
+    Export search results to CSV
+
+    Query parameters:
+    - q: Search query string
+    - type: Filter by type
+    - price_min: Minimum price
+    - price_max: Maximum price
+    - date_from: Date range start
+    - date_to: Date range end
+    - sort_by: Sort field
+    - sort_order: Sort order
+    """
+    try:
+        query = request.args.get("q", "").strip()
+        sort_by = request.args.get("sort_by", "date_subasta")
+        sort_order = request.args.get("sort_order", "DESC").upper()
+
+        filters = {}
+        if type_filter := request.args.get("type"):
+            if type_filter in ["inmueble", "vehiculo", "mueble", "otros"]:
+                filters["type"] = type_filter
+
+        if price_min := request.args.get("price_min"):
+            try:
+                filters["price_min"] = float(price_min)
+            except ValueError:
+                return (
+                    jsonify({"error": "Invalid price_min value", "code": "INVALID_PARAM"}),
+                    400,
+                )
+
+        if price_max := request.args.get("price_max"):
+            try:
+                filters["price_max"] = float(price_max)
+            except ValueError:
+                return (
+                    jsonify({"error": "Invalid price_max value", "code": "INVALID_PARAM"}),
+                    400,
+                )
+
+        if date_from := request.args.get("date_from"):
+            filters["date_from"] = date_from
+
+        if date_to := request.args.get("date_to"):
+            filters["date_to"] = date_to
+
+        assets, total = db.search_assets(
+            query=query or None,
+            filters=filters or None,
+            limit=10000,
+            offset=0,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+
+        output = io.StringIO()
+        if assets:
+            fieldnames = [
+                "id",
+                "type",
+                "description",
+                "price_initial",
+                "price_min",
+                "date_subasta",
+                "location",
+                "created_at",
+                "updated_at",
+            ]
+            writer = csv.DictWriter(output, fieldnames=fieldnames, restval="")
+            writer.writeheader()
+            writer.writerows(assets)
+
+        response = Response(output.getvalue(), mimetype="text/csv")
+        response.headers["Content-Disposition"] = "attachment; filename=assets_export.csv"
+        return response, 200
+
+    except Exception as e:
+        return (
+            jsonify(
+                {
+                    "error": str(e),
+                    "code": "EXPORT_ERROR",
+                }
+            ),
             500,
         )
 

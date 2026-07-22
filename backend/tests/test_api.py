@@ -571,3 +571,72 @@ class TestDatabaseInitialization:
         count2 = data2["total"]
 
         assert count1 == count2
+
+    def test_search_with_sort_by_price(self, client):
+        """Test search endpoint with price sorting"""
+        response = client.get("/api/search?sort_by=price_initial&sort_order=ASC")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert "sort_by" in data
+        assert data["sort_by"] == "price_initial"
+        assert data["sort_order"] == "ASC"
+
+    def test_search_with_sort_by_date(self, client):
+        """Test search endpoint with date sorting"""
+        response = client.get("/api/search?sort_by=date_subasta&sort_order=DESC")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["sort_by"] == "date_subasta"
+        assert data["sort_order"] == "DESC"
+
+    def test_search_defaults_to_date_sort(self, client):
+        """Test that search defaults to date sorting"""
+        response = client.get("/api/search")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["sort_by"] == "date_subasta"
+        assert data["sort_order"] == "DESC"
+
+    def test_export_endpoint_csv_format(self, client):
+        """Test export endpoint returns CSV format"""
+        response = client.get("/api/export")
+        assert response.status_code == 200
+        assert response.content_type == "text/csv; charset=utf-8"
+
+    def test_export_endpoint_with_filters(self, client):
+        """Test export endpoint with filters"""
+        response = client.get("/api/export?q=madrid&type=inmueble")
+        assert response.status_code == 200
+        assert response.content_type == "text/csv; charset=utf-8"
+
+    def test_export_endpoint_invalid_price_min(self, client):
+        """Test export endpoint with invalid price_min"""
+        response = client.get("/api/export?price_min=invalid")
+        assert response.status_code == 400
+        data = response.get_json()
+        assert "error" in data
+
+    def test_export_endpoint_invalid_price_max(self, client):
+        """Test export endpoint with invalid price_max"""
+        response = client.get("/api/export?price_max=invalid")
+        assert response.status_code == 400
+        data = response.get_json()
+        assert "error" in data
+
+    def test_export_endpoint_with_sorting(self, client):
+        """Test export endpoint with sorting parameters"""
+        response = client.get(
+            "/api/export?sort_by=price_initial&sort_order=ASC"
+        )
+        assert response.status_code == 200
+        assert response.content_type == "text/csv; charset=utf-8"
+
+    def test_export_csv_headers(self, client):
+        """Test that export CSV has correct headers"""
+        response = client.get("/api/export")
+        assert response.status_code == 200
+        csv_content = response.data.decode("utf-8")
+        assert "id" in csv_content
+        assert "type" in csv_content
+        assert "description" in csv_content
+        assert "price_initial" in csv_content
