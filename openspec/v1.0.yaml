@@ -1,0 +1,312 @@
+openspec: "1.0"
+metadata:
+  name: AssetFinder
+  version: 1.0.0
+  description: "Buscador de bienes embargados en portal Seguridad Social española"
+  portal_url: "https://w6.seg-social.es/subastas/"
+  coverage_target: 100
+  coverage_target_branches: 100
+
+dataModels:
+  Asset:
+    id:
+      type: string
+      description: "Identificador único del bien embargado"
+      required: true
+    type:
+      type: enum
+      values: [inmueble, vehiculo, mueble, otros]
+      required: true
+    description:
+      type: string
+      description: "Descripción detallada del bien"
+      required: true
+    price_initial:
+      type: float
+      description: "Precio inicial de la subasta"
+      required: true
+    price_min:
+      type: float
+      description: "Puja mínima permitida"
+      required: false
+    date_subasta:
+      type: date
+      description: "Fecha de la subasta"
+      required: true
+    location:
+      type: string
+      description: "Ubicación del bien"
+      required: false
+    created_at:
+      type: timestamp
+      description: "Fecha de creación del registro"
+      required: true
+    updated_at:
+      type: timestamp
+      description: "Fecha última actualización"
+      required: true
+
+  SearchHistory:
+    id:
+      type: integer
+      description: "ID único del historial"
+      required: true
+    query:
+      type: string
+      description: "Texto de búsqueda"
+      required: true
+    filters:
+      type: json
+      description: "Filtros aplicados (tipo, precio_min, precio_max, fecha_desde, fecha_hasta)"
+      required: false
+    result_count:
+      type: integer
+      description: "Cantidad de resultados encontrados"
+      required: true
+    created_at:
+      type: timestamp
+      description: "Fecha de la búsqueda"
+      required: true
+
+functions:
+  scraper.fetch_assets:
+    description: "Obtiene bienes embargados del portal"
+    params:
+      query:
+        type: string
+        description: "Texto de búsqueda"
+      filters:
+        type: dict
+        description: "Filtros: type, price_min, price_max, date_from, date_to"
+    returns:
+      type: list[dict]
+      description: "Lista de bienes embargados con metadatos"
+    tests:
+      - test_fetch_mock_data_success
+      - test_fetch_empty_results
+      - test_fetch_with_filters
+      - test_fetch_api_error_handling
+
+  parser.parse_response:
+    description: "Parsea respuesta HTML del portal y extrae datos de bienes"
+    params:
+      html_response:
+        type: string
+        description: "Contenido HTML del portal"
+    returns:
+      type: list[dict]
+      description: "Lista de bienes normalizados"
+    tests:
+      - test_parse_valid_html
+      - test_parse_malformed_html
+      - test_parse_with_edge_cases
+      - test_parse_empty_response
+
+  db.create_tables:
+    description: "Crea schema SQLite con tablas assets y search_history"
+    params: {}
+    returns:
+      type: bool
+      description: "True si creación exitosa"
+    tests:
+      - test_create_tables_success
+      - test_create_tables_idempotent
+
+  db.insert_asset:
+    description: "Inserta o actualiza un bien en la BD"
+    params:
+      asset:
+        type: dict
+        description: "Datos del bien (conforme a modelo Asset)"
+    returns:
+      type: string
+      description: "ID del bien insertado"
+    tests:
+      - test_insert_asset_success
+      - test_insert_asset_duplicate
+      - test_insert_asset_invalid_data
+
+  db.search_assets:
+    description: "Busca bienes en BD con filtros"
+    params:
+      query:
+        type: string
+        description: "Texto a buscar en descripción"
+      filters:
+        type: dict
+        description: "Filtros: type, price_min, price_max"
+    returns:
+      type: list[dict]
+      description: "Lista de bienes coincidentes"
+    tests:
+      - test_search_by_query
+      - test_search_with_filters
+      - test_search_empty_results
+      - test_search_pagination
+
+  api.search_endpoint:
+    description: "Endpoint HTTP GET /api/search"
+    params:
+      q:
+        type: string
+        description: "Query string de búsqueda"
+      type:
+        type: string
+        description: "Filtro tipo de bien"
+      price_min:
+        type: float
+        description: "Precio mínimo"
+      price_max:
+        type: float
+        description: "Precio máximo"
+    returns:
+      type: json
+      description: '{"assets": [...], "total": N, "timestamp": "ISO8601"}'
+    tests:
+      - test_api_search_success
+      - test_api_search_missing_params
+      - test_api_search_invalid_filters
+
+  ui.render_search_form:
+    description: "Renderiza formulario de búsqueda en DOM"
+    params:
+      container:
+        type: HTMLElement
+        description: "Elemento contenedor"
+    returns:
+      type: void
+    tests:
+      - test_render_form_structure
+      - test_form_event_listeners
+
+  ui.render_results:
+    description: "Renderiza resultados de búsqueda en DOM"
+    params:
+      assets:
+        type: list[dict]
+        description: "Lista de bienes a renderizar"
+      container:
+        type: HTMLElement
+    returns:
+      type: void
+    tests:
+      - test_render_results_empty
+      - test_render_results_with_data
+      - test_render_results_snapshot
+
+features:
+  search_assets:
+    name: "Buscar bienes embargados"
+    description: "Permite buscar bienes embargados por criterios"
+    priority: "P0"
+    tests:
+      - test_search_by_keyword
+      - test_search_empty_query
+      - test_search_no_results
+
+  filter_results:
+    name: "Filtrar resultados"
+    description: "Filtrar por tipo, precio, fecha"
+    priority: "P1"
+    tests:
+      - test_filter_by_type
+      - test_filter_by_price_range
+      - test_filter_by_date
+
+  view_asset_details:
+    name: "Ver detalles de bien"
+    description: "Mostrar información completa de un bien embargado"
+    priority: "P1"
+    tests:
+      - test_asset_details_load
+      - test_asset_details_formatting
+
+  export_results:
+    name: "Exportar resultados"
+    description: "Exportar búsqueda a CSV"
+    priority: "P2"
+    tests:
+      - test_export_to_csv
+      - test_export_empty_results
+
+deltas:
+  0.1:
+    title: "Setup base - estructura y configuración"
+    description: "Crear estructura de directorios, tests y CI/CD"
+    changes:
+      - "Crear directorios backend/, frontend/, openspec/"
+      - "OpenSpec v1.0.yaml (este archivo)"
+      - "Configurar pytest con .coveragerc y pytest.ini"
+      - "Configurar Jest con jsdom"
+      - "GitHub Actions CI/CD"
+      - "README.md y DEVELOPMENT.md"
+      - "Makefiles para ambas capas"
+
+  0.2:
+    title: "Backend - Database + Scraper mock"
+    description: "SQLite, fetch_assets() con mock, API Flask básica"
+    depends_on: ["0.1"]
+    changes:
+      - "src/db.py: creación de tablas, modelos"
+      - "src/scraper.py: fetch_assets() con mock data"
+      - "src/api.py: Flask con GET /api/search, GET /api/assets/:id"
+      - "tests/test_db.py: 100% cobertura"
+      - "tests/test_scraper.py: 100% cobertura"
+
+  0.3:
+    title: "Backend - Parser HTML real"
+    description: "Parseo de https://w6.seg-social.es/subastas/"
+    depends_on: ["0.2"]
+    changes:
+      - "src/parser.py: parseo HTML robusto"
+      - "tests/test_parser.py: con respuestas HTML reales capturadas"
+      - "src/scraper.py: actualizar fetch_assets() para usar parser real"
+
+  0.4:
+    title: "Backend - Persistencia en BD"
+    description: "Guardar assets en SQLite después de scrapear"
+    depends_on: ["0.3"]
+    changes:
+      - "src/api.py: GET /api/assets con filtros desde BD"
+      - "src/scraper.py: integración con db.insert_asset()"
+      - "src/db.py: búsqueda con filtros"
+
+  0.5:
+    title: "Frontend - Interfaz base"
+    description: "HTML, CSS y estructura de componentes JS"
+    depends_on: ["0.1"]
+    changes:
+      - "public/index.html: formulario de búsqueda"
+      - "public/css/styles.css: responsive y accesible"
+      - "public/js/main.js, search.js, ui.js: estructura base"
+
+  0.6:
+    title: "Frontend - Integración y búsqueda"
+    description: "Conectar con API backend, renderizar resultados"
+    depends_on: ["0.5", "0.4"]
+    changes:
+      - "public/js/search.js: fetch a API, gestión de estado"
+      - "public/js/ui.js: renderizado dinámico"
+      - "tests/search.test.js, ui.test.js: 100% cobertura"
+
+  0.7:
+    title: "Features avanzadas"
+    description: "Filtros, ordenamiento, exportación CSV"
+    depends_on: ["0.6"]
+    changes:
+      - "Filtros por tipo, precio, fecha"
+      - "Ordenamiento por precio, fecha"
+      - "Exportación a CSV"
+      - "Historial de búsquedas"
+
+testCoverage:
+  target: 100
+  exclude_patterns:
+    - "/__pycache__/"
+    - "/node_modules/"
+    - "/dist/"
+    - "/build/"
+  backend:
+    - "src/**/*.py"
+  frontend:
+    - "public/js/**/*.js"

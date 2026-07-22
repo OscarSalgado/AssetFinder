@@ -1,0 +1,26 @@
+{
+  "name": "assetfinder-frontend",
+  "version": "1.0.0",
+  "description": "Frontend vanilla JS para AssetFinder",
+  "type": "module",
+  "main": "public/js/main.js",
+  "scripts": {
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "test:dev": "jest --coverage --watch",
+    "coverage": "jest --coverage --coverage-reporters=text --coverage-reporters=html"
+  },
+  "keywords": [
+    "assetfinder",
+    "embargos",
+    "subastas"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@babel/preset-env": "^7.23.0",
+    "babel-jest": "^29.7.0",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0"
+  }
+}

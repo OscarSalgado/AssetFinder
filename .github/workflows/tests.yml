@@ -1,0 +1,89 @@
+name: Tests & Coverage
+
+on:
+  push:
+    branches: [ "main", "develop", "claude/**" ]
+  pull_request:
+    branches: [ "main", "develop" ]
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        cd backend
+        pip install -r requirements.txt
+
+    - name: Run tests with coverage
+      run: |
+        cd backend
+        pytest --cov=src --cov-report=xml --cov-report=term-missing
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./backend/coverage.xml
+        flags: backend
+        name: backend-coverage
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["18.x"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+
+    - name: Install dependencies
+      run: |
+        cd frontend
+        npm install
+
+    - name: Run tests with coverage
+      run: |
+        cd frontend
+        npm test -- --coverage
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./frontend/coverage/coverage-final.json
+        flags: frontend
+        name: frontend-coverage
+
+  lint-check:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Verify OpenSpec exists
+      run: |
+        if [ ! -f "openspec/v1.0.yaml" ]; then
+          echo "OpenSpec v1.0.yaml not found!"
+          exit 1
+        fi
+
+    - name: Check directory structure
+      run: |
+        ls -la backend/src/ || echo "Warning: backend/src/ not found"
+        ls -la frontend/public/ || echo "Warning: frontend/public/ not found"
