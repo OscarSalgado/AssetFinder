@@ -149,6 +149,16 @@ describe('SearchModule', () => {
             await expect(searchModule.getAsset('nonexistent')).rejects.toThrow('Asset not found');
         });
 
+        test('throws error on other API errors', async () => {
+            global.fetch.mockResolvedValueOnce({
+                ok: false,
+                status: 500,
+                statusText: 'Internal Server Error',
+            });
+
+            await expect(searchModule.getAsset('001')).rejects.toThrow('API error');
+        });
+
         test('encodes asset ID properly', async () => {
             global.fetch.mockResolvedValueOnce({
                 ok: true,
@@ -161,6 +171,12 @@ describe('SearchModule', () => {
                 expect.stringContaining(encodeURIComponent('SSSS-2024-001/special')),
                 expect.any(Object)
             );
+        });
+
+        test('throws error on fetch failure', async () => {
+            global.fetch.mockRejectedValueOnce(new Error('Network error'));
+
+            await expect(searchModule.getAsset('001')).rejects.toThrow('Failed to get asset');
         });
     });
 
@@ -206,6 +222,22 @@ describe('SearchModule', () => {
             expect(result.history).toEqual(mockHistory);
             expect(result.total).toBe(1);
         });
+
+        test('throws error on failed API response', async () => {
+            global.fetch.mockResolvedValueOnce({
+                ok: false,
+                status: 500,
+                statusText: 'Internal Server Error',
+            });
+
+            await expect(searchModule.getSearchHistory()).rejects.toThrow('API error');
+        });
+
+        test('throws error on network failure', async () => {
+            global.fetch.mockRejectedValueOnce(new Error('Network error'));
+
+            await expect(searchModule.getSearchHistory()).rejects.toThrow('Failed to load search history');
+        });
     });
 
     describe('getHealth', () => {
@@ -246,6 +278,22 @@ describe('SearchModule', () => {
             expect(result.status).toBe('ok');
             expect(result.scraper.healthy).toBe(true);
             expect(result.database.connected).toBe(true);
+        });
+
+        test('throws error on failed API response', async () => {
+            global.fetch.mockResolvedValueOnce({
+                ok: false,
+                status: 500,
+                statusText: 'Internal Server Error',
+            });
+
+            await expect(searchModule.getHealth()).rejects.toThrow('API error');
+        });
+
+        test('throws error on network failure', async () => {
+            global.fetch.mockRejectedValueOnce(new Error('Network error'));
+
+            await expect(searchModule.getHealth()).rejects.toThrow('Failed to check API health');
         });
     });
 });

@@ -255,7 +255,7 @@ describe('UIModule', () => {
     });
 
     describe('formatDate', () => {
-        test('formats valid date', () => {
+        test('formats valid date in Spanish locale', () => {
             const formatted = uiModule.formatDate('2024-03-15');
 
             expect(formatted).toContain('2024');
@@ -268,11 +268,26 @@ describe('UIModule', () => {
             expect(formatted).toBe('N/A');
         });
 
-        test('returns N/A for invalid date', () => {
+        test('returns string for invalid date format', () => {
             const formatted = uiModule.formatDate('invalid');
 
-            expect(formatted).not.toContain('N/A');
-            expect(formatted).not.toBe('');
+            // formatDate returns the dateString if toLocaleDateString throws
+            // This happens when Date() throws or returns Invalid Date
+            expect(formatted).toEqual('invalid');
+        });
+
+        test('handles empty string date', () => {
+            const formatted = uiModule.formatDate('');
+
+            expect(formatted).toBe('N/A');
+        });
+
+        test('handles various date formats', () => {
+            const formatted1 = uiModule.formatDate('2024-01-01');
+            const formatted2 = uiModule.formatDate('2024-12-31');
+
+            expect(formatted1).toContain('2024');
+            expect(formatted2).toContain('2024');
         });
     });
 
@@ -351,6 +366,21 @@ describe('UIModule', () => {
             const successMessage = document.querySelector('.success-message');
             expect(successMessage).not.toBeNull();
             expect(successMessage.textContent).toContain('Test success message');
+        });
+
+        test('removes success message after timeout', (done) => {
+            jest.useFakeTimers();
+            uiModule.showSuccess('Test success');
+
+            let successMessage = document.querySelector('.success-message');
+            expect(successMessage).not.toBeNull();
+
+            jest.advanceTimersByTime(5100);
+            successMessage = document.querySelector('.success-message');
+            expect(successMessage).toBeNull();
+
+            jest.useRealTimers();
+            done();
         });
     });
 

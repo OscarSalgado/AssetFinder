@@ -76,6 +76,9 @@ export class UIModule {
         if (!dateString) return 'N/A';
         try {
             const date = new Date(dateString);
+            if (isNaN(date.getTime())) {
+                return dateString;
+            }
             return date.toLocaleDateString('es-ES', {
                 year: 'numeric',
                 month: 'long',
