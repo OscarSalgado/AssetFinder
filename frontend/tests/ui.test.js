@@ -289,6 +289,22 @@ describe('UIModule', () => {
             expect(formatted1).toContain('2024');
             expect(formatted2).toContain('2024');
         });
+
+        test('handles toLocaleDateString exception', () => {
+            // Mock Date to have a toLocaleDateString that throws
+            const originalDatePrototype = Date.prototype.toLocaleDateString;
+            Date.prototype.toLocaleDateString = jest.fn(() => {
+                throw new Error('Locale error');
+            });
+
+            const formatted = uiModule.formatDate('2024-03-15');
+
+            // Should return the original string when exception occurs
+            expect(formatted).toBe('2024-03-15');
+
+            // Restore original
+            Date.prototype.toLocaleDateString = originalDatePrototype;
+        });
     });
 
     describe('renderSearchHistory', () => {

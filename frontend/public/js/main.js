@@ -1,7 +1,7 @@
 import { SearchModule } from './search.js';
 import { UIModule } from './ui.js';
 
-class App {
+export class App {
     constructor() {
         this.apiBaseUrl = this.getApiBaseUrl();
         this.searchModule = new SearchModule(this.apiBaseUrl);
