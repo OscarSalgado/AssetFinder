@@ -296,7 +296,6 @@ class TestErrorHandling:
 
         assert "error" in data
         assert data["code"] == "NOT_FOUND"
-        assert "path" in data
 
     def test_response_headers(self, client):
         """Test response headers"""
@@ -640,3 +639,115 @@ class TestDatabaseInitialization:
         assert "type" in csv_content
         assert "description" in csv_content
         assert "price_initial" in csv_content
+
+
+class TestSecurityHardening:
+    """Test security hardening improvements"""
+
+    def test_search_query_length_validation(self, client):
+        """Test that query strings exceeding max length are rejected"""
+        long_query = "a" * 1001  # MAX_QUERY_LENGTH = 1000
+        response = client.get(f"/api/search?q={long_query}")
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["code"] == "INVALID_PARAM"
+        assert "Query string too long" in data["error"]
+
+    def test_export_query_length_validation(self, client):
+        """Test that export query strings exceeding max length are rejected"""
+        long_query = "a" * 1001  # MAX_QUERY_LENGTH = 1000
+        response = client.get(f"/api/export?q={long_query}")
+        assert response.status_code == 400
+        data = response.get_json()
+        assert data["code"] == "INVALID_PARAM"
+
+    def test_security_headers_present(self, client):
+        """Test that security headers are included in responses"""
+        response = client.get("/api/health")
+        assert response.status_code == 200
+
+        assert "X-Content-Type-Options" in response.headers
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+        assert "X-Frame-Options" in response.headers
+        assert response.headers["X-Frame-Options"] == "DENY"
+
+        assert "X-XSS-Protection" in response.headers
+        assert response.headers["X-XSS-Protection"] == "1; mode=block"
+
+    def test_error_messages_sanitized_search(self, client):
+        """Test that error messages don't expose internal details"""
+        # Mock database to raise an exception
+        with patch('src.api.db.search_assets') as mock_search:
+            mock_search.side_effect = Exception("Internal DB connection error")
+            response = client.get("/api/search")
+            assert response.status_code == 500
+            data = response.get_json()
+            # Should not contain the actual error message
+            assert "Search operation failed" in data["error"]
+            assert "Internal DB connection error" not in data["error"]
+
+    def test_error_messages_sanitized_get_asset(self, client):
+        """Test that get_asset errors don't expose internal details"""
+        with patch('src.api.db.get_asset') as mock_get:
+            mock_get.side_effect = Exception("Database error: invalid connection")
+            response = client.get("/api/assets/test-id")
+            assert response.status_code == 500
+            data = response.get_json()
+            assert "Failed to retrieve asset" in data["error"]
+            assert "Database error" not in data["error"]
+
+    def test_error_messages_sanitized_export(self, client):
+        """Test that export errors don't expose internal details"""
+        with patch('src.api.db.search_assets') as mock_search:
+            mock_search.side_effect = Exception("CSV writer error")
+            response = client.get("/api/export")
+            assert response.status_code == 500
+            data = response.get_json()
+            assert "Export operation failed" in data["error"]
+            assert "CSV writer error" not in data["error"]
+
+    def test_search_returns_generic_validation_error(self, client):
+        """Test that invalid parameters return generic validation errors"""
+        response = client.get("/api/search?limit=invalid_value")
+        assert response.status_code == 400
+        data = response.get_json()
+        assert "Invalid input parameters" in data["error"]
+
+    def test_404_error_no_path_exposed(self, client):
+        """Test that 404 errors don't expose the requested path"""
+        response = client.get("/api/nonexistent-endpoint")
+        assert response.status_code == 404
+        data = response.get_json()
+        # Should not expose the path
+        assert "path" not in data
+        assert "Endpoint not found" in data["error"]
+
+    def test_500_error_generic_message(self, client):
+        """Test that 500 errors return generic messages"""
+        # Test by triggering an internal error in the health endpoint
+        with patch('src.api.scraper.is_healthy') as mock_health:
+            mock_health.side_effect = Exception("Database crashed!")
+            response = client.get("/api/health")
+            assert response.status_code == 500
+            data = response.get_json()
+            assert "Internal server error" in data["error"]
+            # The error message should be generic, not exposing the exception
+            assert "Database crashed" not in data.get("error", "")
+
+    def test_search_history_invalid_limit_returns_400(self, client):
+        """Test that invalid limit parameter returns 400"""
+        response = client.get("/api/search-history?limit=invalid")
+        assert response.status_code == 400
+        data = response.get_json()
+        assert "Invalid pagination parameters" in data["error"]
+
+    def test_search_history_error_handling(self, client):
+        """Test search history error handling sanitizes messages"""
+        with patch('src.api.db.get_search_history') as mock_history:
+            mock_history.side_effect = Exception("Query execution failed")
+            response = client.get("/api/search-history")
+            assert response.status_code == 500
+            data = response.get_json()
+            assert "Failed to retrieve search history" in data["error"]
+            assert "Query execution failed" not in data["error"]

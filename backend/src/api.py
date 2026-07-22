@@ -1,16 +1,31 @@
 from flask import Flask, request, jsonify, Response
 from datetime import datetime
 from typing import Tuple
+from functools import wraps
 import os
 import csv
 import io
+import logging
 
 from .db import Database
 from .scraper import create_scraper
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Initialize Flask app
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
+
+# Security configuration
+MAX_QUERY_LENGTH = 1000
+MAX_EXPORT_ROWS = 50000
+RATE_LIMIT_REQUESTS = 100
+RATE_LIMIT_WINDOW = 3600  # 1 hour
 
 # Initialize database and scraper
 db = Database()
@@ -25,23 +40,50 @@ def _initialize_database():
 
 @app.before_request
 def before_request():
-    """Ensure database and scraper are initialized"""
-    if db.get_asset_count() == 0:
-        _initialize_database()
+    """Ensure database and scraper are initialized and log requests"""
+    logger.info(f"{request.method} {request.path} from {request.remote_addr}")
+    try:
+        if db.get_asset_count() == 0:
+            _initialize_database()
+    except Exception as e:
+        logger.error(f"Error initializing database in before_request: {type(e).__name__}")
+        # Re-raise to trigger error handlers
+        raise
+
+
+@app.after_request
+def add_security_headers(response):
+    """Add security headers to all responses"""
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';"
+    return response
 
 
 @app.route("/api/health", methods=["GET"])
 def health_check() -> Tuple[dict, int]:
     """Health check endpoint"""
-    return (
-        {
-            "status": "ok",
-            "timestamp": datetime.utcnow().isoformat(),
-            "scraper": {"healthy": scraper.is_healthy()},
-            "database": {"connected": True},
-        },
-        200,
-    )
+    try:
+        return (
+            {
+                "status": "ok",
+                "timestamp": datetime.utcnow().isoformat(),
+                "scraper": {"healthy": scraper.is_healthy()},
+                "database": {"connected": True},
+            },
+            200,
+        )
+    except Exception as e:
+        logger.error(f"Error in health check: {type(e).__name__}")
+        return (
+            {
+                "error": "Internal server error",
+                "code": "INTERNAL_ERROR",
+            },
+            500,
+        )
 
 
 @app.route("/api/search", methods=["GET"])
@@ -64,6 +106,15 @@ def search_assets() -> Tuple[dict, int]:
     try:
         # Get query parameters
         query = request.args.get("q", "").strip()
+
+        # Validate query length
+        if len(query) > MAX_QUERY_LENGTH:
+            logger.warning(f"Query string exceeds max length: {len(query)}")
+            return (
+                {"error": "Query string too long", "code": "INVALID_PARAM"},
+                400,
+            )
+
         limit = min(int(request.args.get("limit", 50)), 1000)
         offset = max(int(request.args.get("offset", 0)), 0)
         sort_by = request.args.get("sort_by", "date_subasta")
@@ -113,6 +164,8 @@ def search_assets() -> Tuple[dict, int]:
         # Log search to history
         db.add_search_history(query or "", filters or {}, total)
 
+        logger.info(f"Search completed: query='{query[:50]}', filters={filters}, results={total}")
+
         return (
             {
                 "assets": assets,
@@ -126,10 +179,20 @@ def search_assets() -> Tuple[dict, int]:
             200,
         )
 
-    except Exception as e:
+    except ValueError as e:
+        logger.error(f"Validation error in search: {type(e).__name__}")
         return (
             {
-                "error": str(e),
+                "error": "Invalid input parameters",
+                "code": "INVALID_PARAM",
+            },
+            400,
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in search: {type(e).__name__}")
+        return (
+            {
+                "error": "Search operation failed",
                 "code": "SEARCH_ERROR",
             },
             500,
@@ -143,11 +206,13 @@ def get_asset(asset_id: str) -> Tuple[dict, int]:
         asset = db.get_asset(asset_id)
 
         if not asset:
+            logger.info(f"Asset not found: {asset_id}")
             return (
                 {"error": "Asset not found", "code": "NOT_FOUND"},
                 404,
             )
 
+        logger.info(f"Asset retrieved: {asset_id}")
         return (
             {
                 "asset": asset,
@@ -157,9 +222,10 @@ def get_asset(asset_id: str) -> Tuple[dict, int]:
         )
 
     except Exception as e:
+        logger.error(f"Error retrieving asset {asset_id}: {type(e).__name__}")
         return (
             {
-                "error": str(e),
+                "error": "Failed to retrieve asset",
                 "code": "GET_ASSET_ERROR",
             },
             500,
@@ -170,7 +236,9 @@ def get_asset(asset_id: str) -> Tuple[dict, int]:
 def sync_assets() -> Tuple[dict, int]:
     """Sync assets from portal to database"""
     try:
+        logger.info("Starting asset sync")
         count = scraper.sync_assets()
+        logger.info(f"Asset sync completed: {count} assets synced")
         return (
             {
                 "message": f"Synced {count} assets",
@@ -180,9 +248,10 @@ def sync_assets() -> Tuple[dict, int]:
             200,
         )
     except Exception as e:
+        logger.error(f"Error during sync: {type(e).__name__}")
         return (
             {
-                "error": str(e),
+                "error": "Sync operation failed",
                 "code": "SYNC_ERROR",
             },
             500,
@@ -198,6 +267,7 @@ def get_search_history() -> Tuple[dict, int]:
 
         history, total = db.get_search_history(limit=limit, offset=offset)
 
+        logger.info(f"Search history retrieved: {total} total items, returned {len(history)}")
         return (
             {
                 "history": history,
@@ -209,10 +279,20 @@ def get_search_history() -> Tuple[dict, int]:
             200,
         )
 
-    except Exception as e:
+    except ValueError as e:
+        logger.error(f"Validation error in search history: {type(e).__name__}")
         return (
             {
-                "error": str(e),
+                "error": "Invalid pagination parameters",
+                "code": "INVALID_PARAM",
+            },
+            400,
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in search history: {type(e).__name__}")
+        return (
+            {
+                "error": "Failed to retrieve search history",
                 "code": "HISTORY_ERROR",
             },
             500,
@@ -236,6 +316,15 @@ def export_assets() -> Tuple[Response, int]:
     """
     try:
         query = request.args.get("q", "").strip()
+
+        # Validate query length
+        if len(query) > MAX_QUERY_LENGTH:
+            logger.warning(f"Export query exceeds max length: {len(query)}")
+            return (
+                jsonify({"error": "Query string too long", "code": "INVALID_PARAM"}),
+                400,
+            )
+
         sort_by = request.args.get("sort_by", "date_subasta")
         sort_order = request.args.get("sort_order", "DESC").upper()
 
@@ -271,11 +360,19 @@ def export_assets() -> Tuple[Response, int]:
         assets, total = db.search_assets(
             query=query or None,
             filters=filters or None,
-            limit=10000,
+            limit=MAX_EXPORT_ROWS,
             offset=0,
             sort_by=sort_by,
             sort_order=sort_order,
         )
+
+        # Validate export size
+        if len(assets) > MAX_EXPORT_ROWS:
+            logger.warning(f"Export request exceeds max rows: {len(assets)}")
+            return (
+                jsonify({"error": f"Export limited to {MAX_EXPORT_ROWS} rows", "code": "EXPORT_TOO_LARGE"}),
+                413,
+            )
 
         output = io.StringIO()
         if assets:
@@ -294,15 +391,28 @@ def export_assets() -> Tuple[Response, int]:
             writer.writeheader()
             writer.writerows(assets)
 
+        logger.info(f"Export completed: {len(assets)} rows, query='{query[:50]}'")
         response = Response(output.getvalue(), mimetype="text/csv")
         response.headers["Content-Disposition"] = "attachment; filename=assets_export.csv"
         return response, 200
 
-    except Exception as e:
+    except ValueError as e:
+        logger.error(f"Validation error in export: {type(e).__name__}")
         return (
             jsonify(
                 {
-                    "error": str(e),
+                    "error": "Invalid input parameters",
+                    "code": "INVALID_PARAM",
+                }
+            ),
+            400,
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in export: {type(e).__name__}")
+        return (
+            jsonify(
+                {
+                    "error": "Export operation failed",
                     "code": "EXPORT_ERROR",
                 }
             ),
@@ -313,11 +423,11 @@ def export_assets() -> Tuple[Response, int]:
 @app.errorhandler(404)
 def not_found(error):
     """404 error handler"""
+    logger.warning(f"404 error: {request.path}")
     return (
         {
             "error": "Endpoint not found",
             "code": "NOT_FOUND",
-            "path": request.path,
         },
         404,
     )
@@ -326,6 +436,7 @@ def not_found(error):
 @app.errorhandler(500)
 def internal_error(error):
     """500 error handler"""
+    logger.error(f"500 error: {type(error).__name__}")
     return (
         {
             "error": "Internal server error",
