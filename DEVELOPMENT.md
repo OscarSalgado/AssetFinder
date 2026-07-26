@@ -2,6 +2,58 @@
 
 Este documento proporciona instrucciones detalladas para desarrollar AssetFinder siguiendo los deltas especificados en `openspec/v1.0.yaml`.
 
+## OpenSpec: Referencia Central del Proyecto
+
+**La fuente única de verdad para AssetFinder es `openspec/v1.0.yaml`**
+
+El OpenSpec documenta:
+- **Modelos de datos**: Asset, SearchHistory (estructura, tipos, validaciones)
+- **Funciones**: Qué debe implementarse en cada módulo (scraper, parser, db, api, ui)
+- **Características**: Features principales y su prioridad
+- **Deltas**: Plan de desarrollo incremental con dependencias (0.1 → 0.8)
+- **Cobertura**: Targets de testing para backend (100%) y frontend (100%)
+
+### Acceder al OpenSpec
+
+```bash
+# Ver estructura completa del OpenSpec
+make openspec-show
+
+# Ver específico delta
+make openspec-delta DELTA=0.5
+
+# Validar que el proyecto sigue la especificación
+make openspec-check
+```
+
+### Estructura de Deltas
+
+Cada delta tiene:
+- **Título y descripción**: Qué se implementa
+- **Dependencias**: Qué deltas previos son necesarios
+- **Cambios**: Archivos/módulos a crear/modificar
+- **Tests**: Cobertura esperada (100%)
+- **Métrica de éxito**: Coverage report verde
+
+**Ejemplo Delta:**
+```yaml
+0.5:
+  title: "Frontend - Interfaz base"
+  description: "HTML, CSS y estructura de componentes JS"
+  depends_on: ["0.1"]
+  changes:
+    - "public/index.html"
+    - "public/css/styles.css"
+    - "public/js/main.js, search.js, ui.js"
+```
+
+**Al comenzar un delta:**
+1. Leer la especificación en `openspec/v1.0.yaml`
+2. Entender dependencias (qué delta debe estar listo primero)
+3. Crear tests primero (TDD)
+4. Implementar hasta que cobertura = 100%
+5. Actualizar OpenSpec con métricas finales
+
 ## Requisitos Previos
 
 - Python 3.11+ con venv

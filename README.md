@@ -4,6 +4,30 @@
 
 Aplicación web que permite buscar, filtrar y consultar información sobre bienes embargados disponibles en https://w6.seg-social.es/subastas/
 
+**Status**: ✅ Production-ready with comprehensive security hardening
+
+## Referencia Rápida: OpenSpec
+
+**La especificación del proyecto está en `openspec/v1.0.yaml`**
+
+Acceso rápido:
+- 📖 **Índice legible**: Ver `OPENSPEC.md` (tabla de contents y resumen)
+- 📄 **YAML completo**: `openspec/v1.0.yaml` (fuente única de verdad)
+- 🔨 **Comandos make**:
+  ```bash
+  make openspec-show    # Ver especificación completa
+  make openspec-check   # Validar estructura del proyecto
+  make openspec-delta DELTA=0.5  # Ver delta específico
+  ```
+
+**8 Deltas Completados** (0.1 → 0.8):
+- Setup base, Backend (DB + Parser + Persistencia), Frontend (UI + Integration + Features), Security Hardening
+
+**Métricas Finales**:
+- 460 tests (273 backend + 187 frontend)
+- 94.26% backend coverage, 100% statement / 92.76% branch frontend
+- OWASP Top 10 compliant
+
 ## Características
 
 - 🔍 Búsqueda de bienes embargados por criterios

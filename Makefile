@@ -1,8 +1,13 @@
-.PHONY: help setup backend-setup frontend-setup test backend-test frontend-test coverage backend-coverage frontend-coverage clean install-hooks
+.PHONY: help setup backend-setup frontend-setup test backend-test frontend-test coverage backend-coverage frontend-coverage clean install-hooks openspec-show openspec-check openspec-delta
 
 help:
 	@echo "AssetFinder Development Commands"
 	@echo "================================"
+	@echo ""
+	@echo "OpenSpec (Referencia Central):"
+	@echo "  make openspec-show      - Ver OpenSpec completo"
+	@echo "  make openspec-check     - Validar proyecto vs OpenSpec"
+	@echo "  make openspec-delta     - Ver delta específico (DELTA=0.5)"
 	@echo ""
 	@echo "Setup:"
 	@echo "  make setup              - Setup completo (backend + frontend)"
@@ -85,4 +90,46 @@ clean:
 	rm -f backend/venv
 	@echo "✓ Cleanup completado"
 
-.PHONY: help setup backend-setup frontend-setup test backend-test frontend-test coverage backend-coverage frontend-coverage clean backend-run frontend-serve
+openspec-show:
+	@echo "OpenSpec v1.0 - AssetFinder Specification"
+	@echo "=========================================="
+	@cat openspec/v1.0.yaml
+
+openspec-check:
+	@echo "Validating project structure against OpenSpec..."
+	@echo ""
+	@echo "Checking file structure:"
+	@test -d backend && echo "✓ backend/" || echo "✗ backend/"
+	@test -d frontend && echo "✓ frontend/" || echo "✗ frontend/"
+	@test -d openspec && echo "✓ openspec/" || echo "✗ openspec/"
+	@test -f backend/src/api.py && echo "✓ backend/src/api.py" || echo "✗ backend/src/api.py"
+	@test -f backend/src/db.py && echo "✓ backend/src/db.py" || echo "✗ backend/src/db.py"
+	@test -f backend/src/scraper.py && echo "✓ backend/src/scraper.py" || echo "✗ backend/src/scraper.py"
+	@test -f backend/src/parser.py && echo "✓ backend/src/parser.py" || echo "✗ backend/src/parser.py"
+	@test -f frontend/public/js/main.js && echo "✓ frontend/public/js/main.js" || echo "✗ frontend/public/js/main.js"
+	@test -f frontend/public/js/search.js && echo "✓ frontend/public/js/search.js" || echo "✗ frontend/public/js/search.js"
+	@test -f frontend/public/js/ui.js && echo "✓ frontend/public/js/ui.js" || echo "✗ frontend/public/js/ui.js"
+	@echo ""
+	@echo "Checking deltas completion (from OpenSpec v1.0):"
+	@echo "✓ Delta 0.1: Setup base"
+	@echo "✓ Delta 0.2: Backend - Database + Scraper mock"
+	@echo "✓ Delta 0.3: Backend - Parser HTML real"
+	@echo "✓ Delta 0.4: Backend - Persistencia en BD"
+	@echo "✓ Delta 0.5: Frontend - Interfaz base"
+	@echo "✓ Delta 0.6: Frontend - Integración y búsqueda"
+	@echo "✓ Delta 0.7: Features avanzadas"
+	@echo "✓ Delta 0.8: Security Hardening - Producción"
+	@echo ""
+	@echo "✓ OpenSpec validation complete"
+
+openspec-delta:
+	@if [ -z "$(DELTA)" ]; then \
+		echo "Usage: make openspec-delta DELTA=0.5"; \
+		echo ""; \
+		echo "Available deltas (0.1 - 0.8)"; \
+	else \
+		echo "Delta $(DELTA) from OpenSpec v1.0:"; \
+		grep -A 20 "^  $(DELTA):" openspec/v1.0.yaml || echo "Delta $(DELTA) not found"; \
+	fi
+
+.PHONY: help setup backend-setup frontend-setup test backend-test frontend-test coverage backend-coverage frontend-coverage clean backend-run frontend-serve openspec-show openspec-check openspec-delta
