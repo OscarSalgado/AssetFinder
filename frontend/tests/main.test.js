@@ -1,5 +1,6 @@
 import { SearchModule } from '../public/js/search.js';
 import { UIModule } from '../public/js/ui.js';
+import { App } from '../public/js/main.js';
 
 describe('App Integration', () => {
     beforeEach(() => {
@@ -242,5 +243,320 @@ describe('App Integration', () => {
 
         expect(result.history.length).toBe(1);
         expect(result.total).toBe(1);
+    });
+});
+
+describe('App Class Tests', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div class="container">
+                <header class="header">
+                    <h1>AssetFinder</h1>
+                </header>
+                <main class="main-content">
+                    <section class="search-section">
+                        <form id="searchForm">
+                            <input id="query" type="text" value="">
+                            <select id="type">
+                                <option value="">All</option>
+                                <option value="inmueble">Inmueble</option>
+                            </select>
+                            <input id="priceMin" type="number" value="">
+                            <input id="priceMax" type="number" value="">
+                            <input id="dateFrom" type="date" value="">
+                            <input id="dateTo" type="date" value="">
+                            <select id="limit"><option value="50" selected>50</option></select>
+                            <input id="offset" type="number" value="0">
+                            <button type="submit">Search</button>
+                            <button type="reset">Clear</button>
+                        </form>
+                    </section>
+                    <section class="results-section">
+                        <div id="resultsContainer"></div>
+                        <div id="resultsCount"></div>
+                        <div id="loadingIndicator"></div>
+                        <div id="paginationControls" style="display: none;">
+                            <button id="prevBtn">Previous</button>
+                            <button id="nextBtn">Next</button>
+                            <span id="pageInfo"></span>
+                        </div>
+                    </section>
+                    <section class="history-section">
+                        <div id="historyContainer"></div>
+                    </section>
+                </main>
+            </div>
+        `;
+
+        global.fetch.mockClear();
+    });
+
+    afterEach(() => {
+        document.body.innerHTML = '';
+    });
+
+    test('App can be instantiated and initialized', () => {
+        const app = new App();
+        expect(app).toBeDefined();
+        expect(app.apiBaseUrl).toBeDefined();
+        expect(app.searchModule).toBeDefined();
+        expect(app.uiModule).toBeDefined();
+    });
+
+    test('App constructs correct API base URL', () => {
+        const app = new App();
+        expect(app.apiBaseUrl).toContain('/api');
+    });
+
+    test('getFiltersFromForm collects all filters', () => {
+        const app = new App();
+        document.getElementById('type').value = 'inmueble';
+        document.getElementById('priceMin').value = '50000';
+        document.getElementById('priceMax').value = '200000';
+        document.getElementById('dateFrom').value = '2024-01-01';
+        document.getElementById('dateTo').value = '2024-12-31';
+
+        const filters = app.getFiltersFromForm();
+
+        expect(filters.type).toBe('inmueble');
+        expect(filters.price_min).toBe(50000);
+        expect(filters.price_max).toBe(200000);
+        expect(filters.date_from).toBe('2024-01-01');
+        expect(filters.date_to).toBe('2024-12-31');
+    });
+
+    test('getFiltersFromForm returns empty object when no filters selected', () => {
+        const app = new App();
+
+        const filters = app.getFiltersFromForm();
+
+        expect(Object.keys(filters).length).toBe(0);
+    });
+
+    test('getFiltersFromForm only includes non-empty filters', () => {
+        const app = new App();
+        const typeSelect = document.getElementById('type');
+        typeSelect.innerHTML = '<option value="">All</option><option value="vehiculo">Vehículo</option>';
+        typeSelect.value = 'vehiculo';
+        document.getElementById('priceMin').value = '';
+        document.getElementById('priceMax').value = '';
+
+        const filters = app.getFiltersFromForm();
+
+        expect(filters.type).toBe('vehiculo');
+        expect(filters.price_min).toBeUndefined();
+        expect(filters.price_max).toBeUndefined();
+    });
+
+    test('handleSearch submits form and resets pagination', async () => {
+        const app = new App();
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                assets: [],
+                total: 0,
+                limit: 50,
+                offset: 0,
+                sort_by: 'date_subasta',
+                sort_order: 'DESC',
+                timestamp: '2024-01-01T00:00:00Z',
+            }),
+        });
+
+        document.getElementById('query').value = 'test';
+        app.currentPage = 5;
+
+        const form = document.getElementById('searchForm');
+        const event = new Event('submit');
+        event.preventDefault = jest.fn();
+
+        await app.handleSearch(event);
+
+        expect(event.preventDefault).toHaveBeenCalled();
+        expect(app.currentPage).toBe(0);
+        expect(app.lastSearchQuery).toBe('test');
+    });
+
+    test('performSearch updates UI with results', async () => {
+        const app = new App();
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                assets: [
+                    {
+                        id: '001',
+                        type: 'inmueble',
+                        description: 'Test asset',
+                        price_initial: 100000,
+                        price_min: 80000,
+                        date_subasta: '2024-03-15',
+                        location: 'Madrid',
+                    },
+                ],
+                total: 1,
+                limit: 50,
+                offset: 0,
+                sort_by: 'date_subasta',
+                sort_order: 'DESC',
+                timestamp: '2024-01-01T00:00:00Z',
+            }),
+        });
+
+        const initialDisplay = document.getElementById('resultsContainer').innerHTML;
+
+        await app.performSearch('test', {});
+
+        const finalDisplay = document.getElementById('resultsContainer').innerHTML;
+        expect(finalDisplay).not.toEqual(initialDisplay);
+    });
+
+    test('previousPage navigates to previous page', async () => {
+        window.scrollTo = jest.fn();
+        const app = new App();
+        app.currentPage = 2;
+        app.lastSearchQuery = 'test';
+        app.lastSearchFilters = {};
+
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                assets: [],
+                total: 100,
+                limit: 50,
+                offset: 0,
+                sort_by: 'date_subasta',
+                sort_order: 'DESC',
+                timestamp: '2024-01-01T00:00:00Z',
+            }),
+        });
+
+        await app.previousPage();
+
+        expect(app.currentPage).toBe(1);
+        expect(window.scrollTo).toHaveBeenCalled();
+    });
+
+    test('previousPage does not navigate before first page', async () => {
+        const app = new App();
+        app.currentPage = 0;
+        app.lastSearchQuery = 'test';
+        app.lastSearchFilters = {};
+
+        await app.previousPage();
+
+        expect(app.currentPage).toBe(0);
+        expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('nextPage navigates to next page', async () => {
+        window.scrollTo = jest.fn();
+        const app = new App();
+        app.currentPage = 0;
+        app.lastSearchQuery = 'test';
+        app.lastSearchFilters = {};
+
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                assets: [],
+                total: 100,
+                limit: 50,
+                offset: 0,
+                sort_by: 'date_subasta',
+                sort_order: 'DESC',
+                timestamp: '2024-01-01T00:00:00Z',
+            }),
+        });
+
+        await app.nextPage();
+
+        expect(app.currentPage).toBe(1);
+        expect(window.scrollTo).toHaveBeenCalled();
+    });
+
+    test('loadSearchHistory handles fetch errors gracefully', async () => {
+        const app = new App();
+        global.fetch.mockRejectedValueOnce(new Error('Network error'));
+
+        const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
+
+        await app.loadSearchHistory();
+
+        expect(consoleWarnSpy).toHaveBeenCalled();
+        consoleWarnSpy.mockRestore();
+    });
+
+    test('performSearch handles API errors', async () => {
+        const app = new App();
+        global.fetch.mockResolvedValueOnce({
+            ok: false,
+            status: 500,
+            statusText: 'Internal Server Error',
+        });
+
+        const uiSpyError = jest.spyOn(app.uiModule, 'showError');
+        const uiSpyLoading = jest.spyOn(app.uiModule, 'showLoading');
+
+        await app.performSearch('test', {});
+
+        expect(uiSpyError).toHaveBeenCalled();
+        expect(uiSpyLoading).toHaveBeenCalledWith(false);
+
+        uiSpyError.mockRestore();
+        uiSpyLoading.mockRestore();
+    });
+
+    test('setupEventListeners handles missing form elements', () => {
+        document.body.innerHTML = '';
+        const app = new App();
+
+        expect(() => app.setupEventListeners()).not.toThrow();
+    });
+
+    test('init loads search history on initialization', async () => {
+        const app = new App();
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                history: [{ query: 'test', result_count: 5, created_at: '2024-01-01' }],
+                total: 1,
+            }),
+        });
+
+        const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
+
+        await app.loadSearchHistory();
+
+        expect(global.fetch).toHaveBeenCalled();
+
+        consoleWarnSpy.mockRestore();
+    });
+
+    test('previousPage scrolls to top', async () => {
+        window.scrollTo = jest.fn();
+        const app = new App();
+        app.currentPage = 2;
+        app.lastSearchQuery = 'test';
+        app.lastSearchFilters = {};
+
+        global.fetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+                assets: [],
+                total: 100,
+                limit: 50,
+                offset: 0,
+                sort_by: 'date_subasta',
+                sort_order: 'DESC',
+                timestamp: '2024-01-01T00:00:00Z',
+            }),
+        });
+
+        await app.previousPage();
+
+        expect(window.scrollTo).toHaveBeenCalledWith({
+            top: 0,
+            behavior: 'smooth',
+        });
     });
 });

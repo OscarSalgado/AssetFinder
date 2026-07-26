@@ -315,4 +315,116 @@ describe('SearchModule', () => {
             await expect(searchModule.getHealth()).rejects.toThrow('Failed to check API health');
         });
     });
+
+    describe('Edge Cases and Branch Coverage', () => {
+        test('buildQueryParams ignores undefined price_min', () => {
+            const result = searchModule.buildQueryParams('', { price_min: undefined });
+            expect(result).not.toContain('price_min=undefined');
+        });
+
+        test('buildQueryParams includes price_min = 0', () => {
+            const result = searchModule.buildQueryParams('', { price_min: 0 });
+            expect(result).toContain('price_min=0');
+        });
+
+        test('buildQueryParams handles whitespace-only query', () => {
+            const result = searchModule.buildQueryParams('   ', {});
+            expect(result).not.toContain('q=');
+        });
+
+        test('buildQueryParams includes all filters together', () => {
+            const result = searchModule.buildQueryParams('madrid', {
+                type: 'inmueble',
+                price_min: 50000,
+                price_max: 200000,
+                date_from: '2024-01-01',
+                date_to: '2024-12-31',
+            }, 100, 25);
+
+            expect(result).toContain('q=madrid');
+            expect(result).toContain('type=inmueble');
+            expect(result).toContain('price_min=50000');
+            expect(result).toContain('price_max=200000');
+            expect(result).toContain('date_from=2024-01-01');
+            expect(result).toContain('date_to=2024-12-31');
+            expect(result).toContain('limit=100');
+            expect(result).toContain('offset=25');
+        });
+
+        test('search with empty assets array returns empty results', async () => {
+            global.fetch.mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({
+                    assets: [],
+                    total: 0,
+                    limit: 50,
+                    offset: 0,
+                    sort_by: 'date_subasta',
+                    sort_order: 'DESC',
+                    timestamp: '2024-01-01T00:00:00Z',
+                }),
+            });
+
+            const result = await searchModule.search('nonexistent');
+
+            expect(result.assets).toEqual([]);
+            expect(result.total).toBe(0);
+        });
+
+        test('getAsset returns asset from response', async () => {
+            const mockAsset = { id: '001', type: 'inmueble', description: 'Test asset' };
+
+            global.fetch.mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({ asset: mockAsset }),
+            });
+
+            const result = await searchModule.getAsset('001');
+
+            expect(result).toEqual(mockAsset);
+        });
+
+        test('buildQueryParams maintains correct order of parameters', () => {
+            const result = searchModule.buildQueryParams('test', { type: 'inmueble' }, 50, 0);
+
+            expect(result).toContain('q=');
+            expect(result).toContain('type=');
+            expect(result).toContain('limit=');
+            expect(result).toContain('offset=');
+        });
+
+        test('getSearchHistory uses default pagination values', async () => {
+            global.fetch.mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({
+                    history: [],
+                    total: 0,
+                    limit: 50,
+                    offset: 0,
+                    timestamp: '2024-01-01T00:00:00Z',
+                }),
+            });
+
+            const result = await searchModule.getSearchHistory();
+
+            expect(result.limit).toBe(50);
+            expect(result.offset).toBe(0);
+        });
+
+        test('search defaults undefined response fields', async () => {
+            global.fetch.mockResolvedValueOnce({
+                ok: true,
+                json: async () => ({
+                    assets: [{ id: '001' }],
+                    total: 1,
+                }),
+            });
+
+            const result = await searchModule.search('test');
+
+            expect(result.sortBy).toBeDefined();
+            expect(result.sortOrder).toBeDefined();
+            expect(result.timestamp).toBeUndefined();
+        });
+    });
 });

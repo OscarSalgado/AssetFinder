@@ -421,4 +421,135 @@ describe('UIModule', () => {
             expect(escaped).toBe('');
         });
     });
+
+    describe('Branch Coverage Tests', () => {
+        test('renderResults returns early when resultsContainer is null', () => {
+            const uiModuleNoContainer = new UIModule();
+            uiModuleNoContainer.resultsContainer = null;
+
+            const assets = [{ id: '1', type: 'inmueble', description: 'Test', price_initial: 100, date_subasta: '2024-01-01', location: 'Test' }];
+            uiModuleNoContainer.renderResults(assets);
+
+            expect(uiModuleNoContainer.resultsContainer).toBeNull();
+        });
+
+        test('updateResultsCount returns early when resultsCount is null', () => {
+            const uiModuleNoCount = new UIModule();
+            uiModuleNoCount.resultsCount = null;
+
+            uiModuleNoCount.updateResultsCount(5);
+            expect(uiModuleNoCount.resultsCount).toBeNull();
+        });
+
+        test('updatePaginationControls returns early when paginationControls is null', () => {
+            const uiModuleNoPagination = new UIModule();
+            uiModuleNoPagination.paginationControls = null;
+
+            uiModuleNoPagination.updatePaginationControls(100, 50, 0);
+            expect(uiModuleNoPagination.paginationControls).toBeNull();
+        });
+
+        test('updatePaginationControls handles missing prevBtn', () => {
+            const uiModuleNoPrevBtn = new UIModule();
+            document.body.innerHTML = `
+                <div id="paginationControls">
+                    <button id="nextBtn">Next</button>
+                    <span id="pageInfo"></span>
+                </div>
+            `;
+            uiModuleNoPrevBtn.paginationControls = document.getElementById('paginationControls');
+
+            uiModuleNoPrevBtn.updatePaginationControls(100, 50, 0);
+            expect(uiModuleNoPrevBtn.paginationControls.style.display).toBe('flex');
+        });
+
+        test('updatePaginationControls handles missing nextBtn', () => {
+            const uiModuleNoNextBtn = new UIModule();
+            document.body.innerHTML = `
+                <div id="paginationControls">
+                    <button id="prevBtn">Prev</button>
+                    <span id="pageInfo"></span>
+                </div>
+            `;
+            uiModuleNoNextBtn.paginationControls = document.getElementById('paginationControls');
+
+            uiModuleNoNextBtn.updatePaginationControls(100, 50, 0);
+            expect(uiModuleNoNextBtn.paginationControls.style.display).toBe('flex');
+        });
+
+        test('updatePaginationControls handles missing pageInfo', () => {
+            const uiModuleNoPageInfo = new UIModule();
+            document.body.innerHTML = `
+                <div id="paginationControls">
+                    <button id="prevBtn">Prev</button>
+                    <button id="nextBtn">Next</button>
+                </div>
+            `;
+            uiModuleNoPageInfo.paginationControls = document.getElementById('paginationControls');
+
+            uiModuleNoPageInfo.updatePaginationControls(100, 50, 0);
+            expect(uiModuleNoPageInfo.paginationControls.style.display).toBe('flex');
+        });
+
+        test('renderSearchHistory returns early when historyContainer is null', () => {
+            const uiModuleNoHistory = new UIModule();
+            uiModuleNoHistory.historyContainer = null;
+
+            const historyData = { history: [{ query: 'test', result_count: 5, created_at: '2024-01-01' }] };
+            uiModuleNoHistory.renderSearchHistory(historyData);
+
+            expect(uiModuleNoHistory.historyContainer).toBeNull();
+        });
+
+        test('showError returns when results section is missing', () => {
+            document.body.innerHTML = '';
+            const uiModuleNoSection = new UIModule();
+
+            uiModuleNoSection.showError('Test error');
+
+            const errorMessage = document.querySelector('.error-message');
+            expect(errorMessage).toBeNull();
+        });
+
+        test('showSuccess returns when results section is missing', () => {
+            document.body.innerHTML = '';
+            const uiModuleNoSection = new UIModule();
+
+            uiModuleNoSection.showSuccess('Test success');
+
+            const successMessage = document.querySelector('.success-message');
+            expect(successMessage).toBeNull();
+        });
+
+        test('formatDate returns original string when Date is invalid but substring works', () => {
+            const formatted = uiModule.formatDate('not-a-date');
+            expect(formatted).toBe('not-a-date');
+        });
+
+        test('escapeHtml returns empty string for undefined', () => {
+            const escaped = uiModule.escapeHtml(undefined);
+            expect(escaped).toBe('');
+        });
+
+        test('createAssetCard handles empty description', () => {
+            const asset = {
+                id: 'TEST-001',
+                type: 'inmueble',
+                description: '',
+                price_initial: 100000,
+                price_min: 80000,
+                date_subasta: '2024-03-15',
+                location: 'Madrid',
+            };
+
+            const card = uiModule.createAssetCard(asset);
+            expect(card).toContain('TEST-001');
+            expect(card).toContain('asset-card');
+        });
+
+        test('getAssetTypeBadge returns original type for unknown types', () => {
+            const badge = uiModule.getAssetTypeBadge('unknown_type');
+            expect(badge).toBe('unknown_type');
+        });
+    });
 });
