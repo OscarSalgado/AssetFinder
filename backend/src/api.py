@@ -9,6 +9,7 @@ import logging
 
 from .db import Database
 from .scraper import create_scraper
+from .deduplication import DeduplicationEngine
 
 # Configure logging
 logging.basicConfig(
@@ -414,6 +415,71 @@ def export_assets() -> Tuple[Response, int]:
                 {
                     "error": "Export operation failed",
                     "code": "EXPORT_ERROR",
+                }
+            ),
+            500,
+        )
+
+
+@app.route("/api/duplicates", methods=["GET"])
+def find_duplicates() -> Tuple[dict, int]:
+    """Find potential duplicates for an asset"""
+    try:
+        asset_id = request.args.get("asset_id", "").strip()
+
+        # Validate asset_id
+        if not asset_id:
+            return jsonify({"error": "asset_id parameter is required"}), 400
+
+        if len(asset_id) > 100:
+            return jsonify({"error": "asset_id exceeds maximum length"}), 400
+
+        # Get the target asset
+        asset = db.get_asset(asset_id)
+        if not asset:
+            return jsonify({"error": f"Asset {asset_id} not found"}), 404
+
+        # Get all assets to search for duplicates
+        all_assets = db.search_assets("", {})
+
+        # Find duplicates using deduplication engine
+        engine = DeduplicationEngine(confidence_threshold=0.8)
+        duplicates = engine.find_duplicates(asset, all_assets)
+
+        # Format response
+        return (
+            jsonify(
+                {
+                    "asset_id": asset_id,
+                    "asset": asset,
+                    "duplicate_count": len(duplicates),
+                    "duplicates": [
+                        {
+                            "id": dup[0].get("id"),
+                            "description": dup[0].get("description"),
+                            "type": dup[0].get("type"),
+                            "price_initial": dup[0].get("price_initial"),
+                            "location": dup[0].get("location"),
+                            "confidence": round(dup[1], 3),
+                        }
+                        for dup in duplicates
+                    ],
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+            ),
+            200,
+        )
+
+    except ValueError as e:
+        logger.error(f"Validation error in duplicates: {str(e)}")
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Unexpected error in duplicates: {type(e).__name__}: {str(e)}")
+        return (
+            jsonify(
+                {
+                    "error": "Duplicate detection failed",
+                    "code": "DUPLICATE_ERROR",
                 }
             ),
             500,
