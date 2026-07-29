@@ -427,8 +427,98 @@ class TestScraperRealScraping:
         db = Database(db_path)
         scraper = Scraper(use_mock=True, db=db)
 
-        with patch.object(db, "insert_asset") as mock_insert:
+        # Both the batch path and the per-row fallback fail: nothing is written
+        # but sync_assets still reports a count instead of blowing up.
+        with patch.object(db, "insert_assets") as mock_batch, \
+                patch.object(db, "insert_asset") as mock_insert:
+            mock_batch.side_effect = Exception("DB error")
             mock_insert.side_effect = Exception("DB error")
 
             count = scraper.sync_assets()
-            assert isinstance(count, int)
+            assert count == 0
+
+    def test_sync_assets_uses_a_single_batch_write(self, tmp_path):
+        """Test syncing writes the whole catalogue in one transaction"""
+        db = Database(str(tmp_path / "test.db"))
+        scraper = Scraper(use_mock=True, db=db)
+
+        with patch.object(db, "insert_assets", wraps=db.insert_assets) as mock_batch, \
+                patch.object(db, "insert_asset", wraps=db.insert_asset) as mock_row:
+            count = scraper.sync_assets()
+
+        assert count > 0
+        assert mock_batch.call_count == 1
+        assert mock_row.call_count == 0
+        assert db.get_asset_count() == count
+
+    def test_sync_assets_falls_back_to_per_row_on_batch_failure(self, tmp_path):
+        """Test a failing batch degrades to per-row inserts, not data loss"""
+        db = Database(str(tmp_path / "test.db"))
+        scraper = Scraper(use_mock=True, db=db)
+
+        with patch.object(db, "insert_assets") as mock_batch:
+            mock_batch.side_effect = Exception("Batch failed")
+
+            count = scraper.sync_assets()
+
+        assert count == len(MOCK_ASSETS)
+        assert db.get_asset_count() == count
+
+    def test_persist_of_empty_list_is_a_noop(self, tmp_path):
+        """Test persisting nothing does not touch the database"""
+        db = Database(str(tmp_path / "test.db"))
+        scraper = Scraper(use_mock=True, db=db)
+
+        with patch.object(db, "insert_assets") as mock_batch:
+            assert scraper._persist([]) == 0
+            mock_batch.assert_not_called()
+
+    def test_fetch_assets_with_save_to_db_uses_batch(self, tmp_path):
+        """Test fetch_assets(save_to_db=True) also goes through the batch path"""
+        db = Database(str(tmp_path / "test.db"))
+        scraper = Scraper(use_mock=True, db=db)
+
+        with patch.object(db, "insert_assets", wraps=db.insert_assets) as mock_batch:
+            results = scraper.fetch_assets(save_to_db=True)
+
+        assert mock_batch.call_count == 1
+        assert db.get_asset_count() == len(results)
+
+
+class TestMockAssetsIsolation:
+    """MOCK_ASSETS is module-level state and must never be mutated"""
+
+    def test_fetch_assets_does_not_mutate_mock_assets(self):
+        """Test fetch_assets does not write metadata into MOCK_ASSETS"""
+        from src.scraper import MOCK_ASSETS, create_scraper
+
+        scraper = create_scraper(use_mock=True)
+        scraper.fetch_assets()
+
+        for asset in MOCK_ASSETS:
+            assert "created_at" not in asset
+            assert "updated_at" not in asset
+
+    def test_fetch_assets_returns_independent_dicts(self):
+        """Test mutating a returned asset does not affect MOCK_ASSETS"""
+        from src.scraper import MOCK_ASSETS, create_scraper
+
+        scraper = create_scraper(use_mock=True)
+        results = scraper.fetch_assets()
+        results[0]["description"] = "MUTATED BY CALLER"
+
+        assert all(
+            asset["description"] != "MUTATED BY CALLER" for asset in MOCK_ASSETS
+        )
+
+    def test_repeated_fetches_are_independent(self):
+        """Test two consecutive fetches do not share asset objects"""
+        from src.scraper import create_scraper
+
+        scraper = create_scraper(use_mock=True)
+        first = scraper.fetch_assets()
+        second = scraper.fetch_assets()
+
+        assert first[0] is not second[0]
+        first[0]["price_initial"] = -1.0
+        assert second[0]["price_initial"] != -1.0

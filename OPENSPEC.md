@@ -108,10 +108,15 @@ La fuente única de verdad para AssetFinder es `openspec/v1.0.yaml`. Este docume
 ## Cobertura de Tests
 
 ```
-Backend:  273 tests, 94.26% coverage (230 core + 43 security)
-Frontend: 187 tests, 100% statement, 92.76% branch coverage
-Total:    460 tests passing
+Backend:  409 tests, 98.09% coverage (line + branch)
+Frontend: 208 tests, 100% statement / line / function, 93.45% branch
+Total:    617 tests passing
 ```
+
+Los gates de cobertura (`backend/pytest.ini`, `frontend/jest.config.cjs`) están
+fijados en los valores realmente alcanzados, de forma que cualquier regresión
+rompe el build. No están en 100%: quedan huecos conocidos en el endpoint de
+export, el scraping real y una rama del parser.
 
 ## Acceder al Contenido Completo
 
@@ -148,9 +153,9 @@ make openspec-check
 
 El proyecto valida que cumple con el OpenSpec mediante:
 - ✅ CI/CD en GitHub Actions
-- ✅ Coverage reports >= 100% (backend), >= 92% (frontend)
-- ✅ All 460 tests passing
-- ✅ Security tests (43 tests dedicados)
+- ✅ Coverage gates: >= 98% (backend), 100% statements / >= 93% branches (frontend)
+- ✅ All 617 tests passing
+- ✅ Rate limiting y validación de entrada activos en la API
 - ✅ All 8 deltas completed
 
 ## Recursos

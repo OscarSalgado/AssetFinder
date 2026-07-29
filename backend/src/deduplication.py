@@ -3,11 +3,43 @@ Deduplication engine for AssetFinder
 Provides fuzzy matching and duplicate detection with weighted scoring
 """
 
-from typing import List, Dict, Tuple, Optional, Set
+from typing import List, Dict, Tuple, Set, Any
+from collections import deque
 from difflib import SequenceMatcher
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class _PreparedAsset:
+    """
+    Normalised view of an asset, built once per asset instead of once per
+    comparison. Comparing N assets is quadratic in pairs, so lowercasing and
+    splitting the same strings inside the inner loop was pure waste.
+    """
+
+    __slots__ = ("asset", "id", "cluster_key", "description", "location",
+                 "location_parts", "type", "price")
+
+    def __init__(self, asset: Dict[str, Any]):
+        self.asset = asset
+        self.id = asset.get("id")
+        # cluster_duplicates keys its graph with a "" default for absent ids.
+        self.cluster_key = asset.get("id", "")
+
+        # _fuzzy_match collapsed runs of whitespace before matching; doing it
+        # here keeps the comparison identical and hoists it out of the loop.
+        description = (asset.get("description") or "").lower().strip()
+        self.description = " ".join(description.split())
+
+        location = (asset.get("location") or "").lower().strip()
+        self.location = location
+        # Parts are deliberately not stripped: the original comparison split on
+        # "," only, so "madrid, españa" yields {"madrid", " españa"}.
+        self.location_parts: Set[str] = set(location.split(",")) if location else set()
+
+        self.type = (asset.get("type") or "").lower().strip()
+        self.price = asset.get("price_initial")
 
 
 class DeduplicationEngine:
@@ -26,6 +58,12 @@ class DeduplicationEngine:
     WEIGHT_PRICE = 0.25
     WEIGHT_LOCATION = 0.15
     WEIGHT_TYPE = 0.10
+
+    # Slack for the pruning bounds. Summing the weighted scores in a different
+    # order can differ from calculate_similarity by ~1e-16, so bounds are
+    # relaxed by a margin far larger than that error and far smaller than any
+    # meaningful score difference. Guarantees pruning never drops a real match.
+    _PRUNE_EPSILON = 1e-12
 
     def __init__(self, confidence_threshold: float = 0.8):
         """
@@ -51,13 +89,22 @@ class DeduplicationEngine:
         Returns:
             List of (asset, confidence_score) tuples sorted by score descending
         """
+        target = _PreparedAsset(asset)
+
+        # One matcher reused across candidates. The target stays as sequence "a"
+        # and each candidate becomes "b", the same orientation the per-pair
+        # SequenceMatcher used, which matters because difflib's autojunk
+        # heuristic only applies to "b".
+        matcher = SequenceMatcher(None)
+        matcher.set_seq1(target.description)
+
         scores = []
         for candidate in candidates:
-            if asset.get("id") == candidate.get("id"):
+            if target.id == candidate.get("id"):
                 continue  # Skip self-comparison
 
-            score = self.calculate_similarity(asset, candidate)
-            if score >= self.confidence_threshold:
+            score = self._score_if_confident(target, _PreparedAsset(candidate), matcher)
+            if score is not None:
                 scores.append((candidate, score))
 
         # Sort by score descending
@@ -74,37 +121,93 @@ class DeduplicationEngine:
         Returns:
             Weighted similarity score (0.0-1.0)
         """
-        scores = {
-            "title": self._score_title_similarity(asset1, asset2),
-            "price": self._score_price_similarity(asset1, asset2),
-            "location": self._score_location_similarity(asset1, asset2),
-            "type": self._score_type_similarity(asset1, asset2),
-        }
+        p1 = _PreparedAsset(asset1)
+        p2 = _PreparedAsset(asset2)
 
-        # Calculate weighted score
-        total_score = (
-            scores["title"] * self.WEIGHT_TITLE
-            + scores["price"] * self.WEIGHT_PRICE
-            + scores["location"] * self.WEIGHT_LOCATION
-            + scores["type"] * self.WEIGHT_TYPE
+        return self._combine(
+            self._title_score(p1, p2),
+            self._price_score(p1, p2),
+            self._location_score(p1, p2),
+            self._type_score(p1, p2),
         )
 
-        return total_score
+    def _combine(
+        self, title: float, price: float, location: float, type_: float
+    ) -> float:
+        """
+        Weighted sum of the four sub-scores.
 
-    def _score_title_similarity(self, asset1: Dict, asset2: Dict) -> float:
+        The operand order is fixed so that a score obtained through the pruning
+        path is bit-identical to one obtained through calculate_similarity.
+        """
+        return (
+            title * self.WEIGHT_TITLE
+            + price * self.WEIGHT_PRICE
+            + location * self.WEIGHT_LOCATION
+            + type_ * self.WEIGHT_TYPE
+        )
+
+    def _score_if_confident(
+        self, p1: _PreparedAsset, p2: _PreparedAsset, matcher: SequenceMatcher
+    ):
+        """
+        Exact similarity score if the pair reaches the confidence threshold,
+        otherwise None.
+
+        The three cheap sub-scores (price, location, type) are O(1) and account
+        for half of the total weight; the title score needs sequence matching
+        and dominates the cost. Since the title score cannot exceed 1.0, any
+        pair whose cheap score leaves too little room to reach the threshold is
+        rejected without matching at all. difflib's real_quick_ratio() and
+        quick_ratio() are documented upper bounds of ratio(), giving two more
+        progressively tighter bail-outs. The result is exact: no pair that would
+        have reached the threshold is discarded.
+        """
+        threshold = self.confidence_threshold
+
+        price = self._price_score(p1, p2)
+        location = self._location_score(p1, p2)
+        type_ = self._type_score(p1, p2)
+
+        cheap = (
+            price * self.WEIGHT_PRICE
+            + location * self.WEIGHT_LOCATION
+            + type_ * self.WEIGHT_TYPE
+        )
+
+        # Upper bound assuming a perfect title match.
+        if cheap + self.WEIGHT_TITLE + self._PRUNE_EPSILON < threshold:
+            return None
+
+        if not p1.description or not p2.description:
+            title = 0.0
+        else:
+            matcher.set_seq2(p2.description)
+
+            if cheap + self.WEIGHT_TITLE * matcher.real_quick_ratio() \
+                    + self._PRUNE_EPSILON < threshold:
+                return None
+
+            if cheap + self.WEIGHT_TITLE * matcher.quick_ratio() \
+                    + self._PRUNE_EPSILON < threshold:
+                return None
+
+            title = matcher.ratio()
+
+        total = self._combine(title, price, location, type_)
+        return total if total >= threshold else None
+
+    def _title_score(self, p1: _PreparedAsset, p2: _PreparedAsset) -> float:
         """Score similarity of descriptions/titles (50% weight)"""
-        desc1 = (asset1.get("description") or "").lower().strip()
-        desc2 = (asset2.get("description") or "").lower().strip()
-
-        if not desc1 or not desc2:
+        if not p1.description or not p2.description:
             return 0.0
 
-        return self._fuzzy_match(desc1, desc2)
+        return SequenceMatcher(None, p1.description, p2.description).ratio()
 
-    def _score_price_similarity(self, asset1: Dict, asset2: Dict) -> float:
+    def _price_score(self, p1: _PreparedAsset, p2: _PreparedAsset) -> float:
         """Score similarity of prices (25% weight)"""
-        price1 = asset1.get("price_initial")
-        price2 = asset2.get("price_initial")
+        price1 = p1.price
+        price2 = p2.price
 
         if price1 is None or price2 is None:
             return 0.0
@@ -122,38 +225,51 @@ class DeduplicationEngine:
         # Score: 1.0 if 0% diff, 0.0 if 100%+ diff
         return max(0.0, 1.0 - diff)
 
-    def _score_location_similarity(self, asset1: Dict, asset2: Dict) -> float:
+    def _location_score(self, p1: _PreparedAsset, p2: _PreparedAsset) -> float:
         """Score similarity of locations (15% weight)"""
-        loc1 = (asset1.get("location") or "").lower().strip()
-        loc2 = (asset2.get("location") or "").lower().strip()
-
-        if not loc1 or not loc2:
+        if not p1.location or not p2.location:
             return 0.0
 
         # Exact match
-        if loc1 == loc2:
+        if p1.location == p2.location:
             return 1.0
 
         # Partial match on key words (city names)
-        words1 = set(loc1.split(","))
-        words2 = set(loc2.split(","))
-        common = words1 & words2
+        common = p1.location_parts & p2.location_parts
 
         if not common:
             return 0.0
 
         # Score based on overlap
-        return len(common) / max(len(words1), len(words2))
+        return len(common) / max(len(p1.location_parts), len(p2.location_parts))
+
+    def _type_score(self, p1: _PreparedAsset, p2: _PreparedAsset) -> float:
+        """Score similarity of asset types (10% weight)"""
+        if not p1.type or not p2.type:
+            return 0.0
+
+        return 1.0 if p1.type == p2.type else 0.0
+
+    # ------------------------------------------------------------------
+    # Dict-based wrappers: the per-field scoring API, kept for callers and
+    # tests that score two raw assets directly.
+    # ------------------------------------------------------------------
+
+    def _score_title_similarity(self, asset1: Dict, asset2: Dict) -> float:
+        """Score similarity of descriptions/titles (50% weight)"""
+        return self._title_score(_PreparedAsset(asset1), _PreparedAsset(asset2))
+
+    def _score_price_similarity(self, asset1: Dict, asset2: Dict) -> float:
+        """Score similarity of prices (25% weight)"""
+        return self._price_score(_PreparedAsset(asset1), _PreparedAsset(asset2))
+
+    def _score_location_similarity(self, asset1: Dict, asset2: Dict) -> float:
+        """Score similarity of locations (15% weight)"""
+        return self._location_score(_PreparedAsset(asset1), _PreparedAsset(asset2))
 
     def _score_type_similarity(self, asset1: Dict, asset2: Dict) -> float:
         """Score similarity of asset types (10% weight)"""
-        type1 = asset1.get("type", "").lower().strip()
-        type2 = asset2.get("type", "").lower().strip()
-
-        if not type1 or not type2:
-            return 0.0
-
-        return 1.0 if type1 == type2 else 0.0
+        return self._type_score(_PreparedAsset(asset1), _PreparedAsset(asset2))
 
     def _fuzzy_match(self, str1: str, str2: str) -> float:
         """
@@ -189,21 +305,27 @@ class DeduplicationEngine:
         if not assets:
             return []
 
+        prepared = [_PreparedAsset(asset) for asset in assets]
+
         # Build similarity graph
-        graph: Dict[str, List[Tuple[str, float]]] = {
-            asset.get("id", ""): [] for asset in assets
-        }
+        graph: Dict[str, List[Tuple[str, float]]] = {p.cluster_key: [] for p in prepared}
+        asset_dict = {p.cluster_key: p.asset for p in prepared}
 
-        asset_dict = {asset.get("id", ""): asset for asset in assets}
+        matcher = SequenceMatcher(None)
+        total = len(prepared)
 
-        for i, asset1 in enumerate(assets):
-            id1 = asset1.get("id", "")
-            for asset2 in assets[i + 1 :]:
-                id2 = asset2.get("id", "")
-                score = self.calculate_similarity(asset1, asset2)
-                if score >= self.confidence_threshold:
-                    graph[id1].append((id2, score))
-                    graph[id2].append((id1, score))
+        for i in range(total):
+            p1 = prepared[i]
+            # Sequence "a" only changes once per outer iteration.
+            matcher.set_seq1(p1.description)
+            key1 = p1.cluster_key
+
+            for j in range(i + 1, total):
+                p2 = prepared[j]
+                score = self._score_if_confident(p1, p2, matcher)
+                if score is not None:
+                    graph[key1].append((p2.cluster_key, score))
+                    graph[p2.cluster_key].append((key1, score))
 
         # Find connected components (clusters)
         visited: Set[str] = set()
@@ -237,11 +359,12 @@ class DeduplicationEngine:
             Cluster of (asset, confidence) tuples
         """
         cluster = []
-        queue = [start_id]
+        # deque: popping the head of a list is O(n), making the traversal O(n^2).
+        queue = deque([start_id])
         visited.add(start_id)
 
         while queue:
-            current_id = queue.pop(0)
+            current_id = queue.popleft()
             if current_id in assets:
                 cluster.append((assets[current_id], 1.0))
 

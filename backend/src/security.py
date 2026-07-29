@@ -8,53 +8,107 @@ import logging
 import re
 import hashlib
 from typing import Dict, Tuple, Optional, Any
-from functools import wraps
-from collections import defaultdict
-from datetime import datetime, timedelta
+from collections import defaultdict, deque
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 # Rate limiting configuration
 class RateLimiter:
-    """Simple in-memory rate limiter using sliding window"""
+    """
+    In-memory rate limiter using a sliding window.
+
+    Timestamps are held in a deque per identifier so expiring them is O(1) per
+    dropped entry instead of rebuilding the whole list on every check. Silent
+    identifiers are swept periodically, otherwise the table would grow without
+    bound for the lifetime of the process.
+    """
+
+    # Requests between two sweeps of fully-expired identifiers.
+    SWEEP_INTERVAL = 1000
 
     def __init__(self, max_requests: int = 100, window_seconds: int = 3600):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
-        self.requests: Dict[str, list] = defaultdict(list)
+        self.requests: Dict[str, deque] = defaultdict(deque)
+        self._checks_since_sweep = 0
+
+    def _drop_expired(self, timestamps: deque, now: float) -> None:
+        """Discard timestamps that fell out of the window."""
+        window_start = now - self.window_seconds
+        while timestamps and timestamps[0] <= window_start:
+            timestamps.popleft()
 
     def is_rate_limited(self, identifier: str) -> bool:
         """Check if an identifier has exceeded rate limit"""
         now = time.time()
-        window_start = now - self.window_seconds
 
-        # Clean old requests outside the window
-        self.requests[identifier] = [
-            req_time for req_time in self.requests[identifier]
-            if req_time > window_start
-        ]
+        self._checks_since_sweep += 1
+        if self._checks_since_sweep >= self.SWEEP_INTERVAL:
+            self.purge_expired()
+
+        timestamps = self.requests[identifier]
+        self._drop_expired(timestamps, now)
 
         # Check if limit exceeded
-        if len(self.requests[identifier]) >= self.max_requests:
+        if len(timestamps) >= self.max_requests:
             logger.warning(f"Rate limit exceeded for {identifier}")
             return True
 
         # Record this request
-        self.requests[identifier].append(now)
+        timestamps.append(now)
         return False
 
     def get_remaining(self, identifier: str) -> int:
         """Get remaining requests for an identifier"""
+        timestamps = self.requests.get(identifier)
+
+        # Unknown identifiers are not tracked, so no entry is created for them.
+        if not timestamps:
+            return self.max_requests
+
+        self._drop_expired(timestamps, time.time())
+
+        if not timestamps:
+            del self.requests[identifier]
+            return self.max_requests
+
+        return max(0, self.max_requests - len(timestamps))
+
+    def retry_after(self, identifier: str) -> int:
+        """Seconds until the oldest request in the window expires."""
+        timestamps = self.requests.get(identifier)
+        if not timestamps:
+            return 0
+
+        elapsed = time.time() - timestamps[0]
+        return max(1, int(self.window_seconds - elapsed))
+
+    def purge_expired(self) -> int:
+        """
+        Forget identifiers with no requests left in the window.
+
+        Returns:
+            Number of identifiers dropped
+        """
         now = time.time()
-        window_start = now - self.window_seconds
+        self._checks_since_sweep = 0
 
-        # Clean old requests
-        self.requests[identifier] = [
-            req_time for req_time in self.requests[identifier]
-            if req_time > window_start
-        ]
+        stale = []
+        for identifier, timestamps in self.requests.items():
+            self._drop_expired(timestamps, now)
+            if not timestamps:
+                stale.append(identifier)
 
-        return max(0, self.max_requests - len(self.requests[identifier]))
+        for identifier in stale:
+            del self.requests[identifier]
+
+        return len(stale)
+
+    def reset(self) -> None:
+        """Drop all tracked state (used when rebuilding the app for tests)."""
+        self.requests.clear()
+        self._checks_since_sweep = 0
 
 
 # Global rate limiter instance
@@ -235,27 +289,6 @@ class SecurityHeaders:
             headers['Access-Control-Max-Age'] = '3600'
 
         return headers
-
-
-def require_api_key(f):
-    """Decorator to require API key validation"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        api_key = None
-
-        # Try to get from header
-        if 'X-API-Key' in request.headers:
-            api_key = request.headers.get('X-API-Key')
-
-        # For development, allow without key
-        # In production, this should validate against a real key store
-        if not api_key:
-            logger.warning("Request without API key")
-            # For now, allow all - this should be enforced in production
-
-        return f(*args, **kwargs)
-
-    return decorated_function
 
 
 def log_security_event(event_type: str, details: Dict[str, Any], level: str = "INFO"):

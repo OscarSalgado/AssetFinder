@@ -56,6 +56,18 @@ frontend-test:
 	cd frontend && npm test -- --coverage
 	@echo "✓ Frontend tests completados"
 
+bench: bench-backend bench-frontend
+	@echo ""
+	@echo "✓ Benchmark completado (comparar contra la ejecución anterior)"
+
+bench-backend:
+	@echo "Benchmark backend (BD, API, deduplicación)..."
+	cd backend && . venv/bin/activate && python bench.py --sizes 100,1000
+
+bench-frontend:
+	@echo "Benchmark frontend (render de resultados)..."
+	cd frontend && npm run bench --silent
+
 coverage: backend-coverage frontend-coverage
 	@echo ""
 	@echo "✓ Reportes de cobertura generados"

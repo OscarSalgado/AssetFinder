@@ -1,6 +1,9 @@
 """Deduplication tests for AssetFinder"""
 
+import random
 import pytest
+from difflib import SequenceMatcher
+from unittest.mock import patch
 from src.deduplication import DeduplicationEngine
 
 
@@ -562,3 +565,240 @@ class TestIntegration:
         clusters = engine.cluster_duplicates(assets)
         # Should find cluster with 3 similar houses
         assert len(clusters) <= 4
+
+
+class ReferenceEngine:
+    """
+    Literal transcription of the pre-optimisation algorithm.
+
+    The optimised engine prunes pairs using upper bounds instead of scoring
+    every pair in full. That is only legitimate if it produces exactly the same
+    output, so the two implementations are compared directly.
+    """
+
+    WEIGHT_TITLE = 0.50
+    WEIGHT_PRICE = 0.25
+    WEIGHT_LOCATION = 0.15
+    WEIGHT_TYPE = 0.10
+
+    def __init__(self, confidence_threshold=0.8):
+        self.confidence_threshold = confidence_threshold
+
+    def find_duplicates(self, asset, candidates):
+        scores = []
+        for candidate in candidates:
+            if asset.get("id") == candidate.get("id"):
+                continue
+            score = self.calculate_similarity(asset, candidate)
+            if score >= self.confidence_threshold:
+                scores.append((candidate, score))
+        return sorted(scores, key=lambda x: x[1], reverse=True)
+
+    def calculate_similarity(self, asset1, asset2):
+        return (
+            self._title(asset1, asset2) * self.WEIGHT_TITLE
+            + self._price(asset1, asset2) * self.WEIGHT_PRICE
+            + self._location(asset1, asset2) * self.WEIGHT_LOCATION
+            + self._type(asset1, asset2) * self.WEIGHT_TYPE
+        )
+
+    def _title(self, a1, a2):
+        d1 = (a1.get("description") or "").lower().strip()
+        d2 = (a2.get("description") or "").lower().strip()
+        if not d1 or not d2:
+            return 0.0
+        return SequenceMatcher(None, " ".join(d1.split()), " ".join(d2.split())).ratio()
+
+    def _price(self, a1, a2):
+        p1, p2 = a1.get("price_initial"), a2.get("price_initial")
+        if p1 is None or p2 is None:
+            return 0.0
+        if p1 == 0 and p2 == 0:
+            return 1.0
+        if p1 == 0 or p2 == 0:
+            return 0.0
+        return max(0.0, 1.0 - abs(p1 - p2) / max(p1, p2))
+
+    def _location(self, a1, a2):
+        l1 = (a1.get("location") or "").lower().strip()
+        l2 = (a2.get("location") or "").lower().strip()
+        if not l1 or not l2:
+            return 0.0
+        if l1 == l2:
+            return 1.0
+        w1, w2 = set(l1.split(",")), set(l2.split(","))
+        common = w1 & w2
+        if not common:
+            return 0.0
+        return len(common) / max(len(w1), len(w2))
+
+    def _type(self, a1, a2):
+        t1 = (a1.get("type") or "").lower().strip()
+        t2 = (a2.get("type") or "").lower().strip()
+        if not t1 or not t2:
+            return 0.0
+        return 1.0 if t1 == t2 else 0.0
+
+    def cluster_duplicates(self, assets):
+        if not assets:
+            return []
+        graph = {a.get("id", ""): [] for a in assets}
+        lookup = {a.get("id", ""): a for a in assets}
+        for i, a1 in enumerate(assets):
+            for a2 in assets[i + 1:]:
+                score = self.calculate_similarity(a1, a2)
+                if score >= self.confidence_threshold:
+                    graph[a1.get("id", "")].append((a2.get("id", ""), score))
+                    graph[a2.get("id", "")].append((a1.get("id", ""), score))
+        visited, clusters = set(), []
+        for key in graph:
+            if key in visited:
+                continue
+            cluster, queue = [], [key]
+            visited.add(key)
+            while queue:
+                current = queue.pop(0)
+                if current in lookup:
+                    cluster.append((lookup[current], 1.0))
+                for neighbour, _ in graph.get(current, []):
+                    if neighbour not in visited:
+                        visited.add(neighbour)
+                        queue.append(neighbour)
+            if cluster:
+                clusters.append(cluster)
+        return clusters
+
+
+def build_equivalence_catalog(size=500, seed=99):
+    """Synthetic catalogue with seeded near-duplicates and awkward edge cases."""
+    rng = random.Random(seed)
+    cities = ["Madrid, España", "Barcelona, España", "Valencia", "", "Bilbao, España"]
+    types = ["inmueble", "vehiculo", "mueble", "otros"]
+    templates = [
+        "Piso de {n} habitaciones en {city} con balcon y plaza de garaje",
+        "Vivienda unifamiliar de {n} dormitorios con jardin y trastero",
+        "Turismo diesel del {n} en buen estado, revision al dia",
+        "Local comercial de {n} metros cuadrados a pie de calle",
+    ]
+
+    assets = []
+    for i in range(size):
+        assets.append({
+            "id": f"EQ-{i:05d}",
+            "type": types[i % len(types)],
+            "description": templates[i % len(templates)].format(
+                n=rng.randint(1, 300), city=cities[i % len(cities)]
+            ),
+            "price_initial": float(rng.randint(0, 300000)),
+            "location": cities[i % len(cities)],
+        })
+
+    # Near-duplicates: same everything, tiny textual and price deviations.
+    for k in range(size // 10):
+        origin = assets[k]
+        assets.append({
+            **origin,
+            "id": f"EQDUP-{k:05d}",
+            "description": origin["description"] + ".",
+            "price_initial": origin["price_initial"] * 1.01,
+        })
+
+    # Edge cases the pruning must not mishandle.
+    assets.extend([
+        {"id": "EDGE-empty-desc", "type": "inmueble", "description": "",
+         "price_initial": 1000.0, "location": "Madrid, España"},
+        {"id": "EDGE-blank-desc", "type": "inmueble", "description": "   ",
+         "price_initial": 1000.0, "location": "Madrid, España"},
+        {"id": "EDGE-no-price", "type": "inmueble", "description": "Piso en Madrid",
+         "price_initial": None, "location": "Madrid, España"},
+        {"id": "EDGE-zero-price", "type": "inmueble", "description": "Piso en Madrid",
+         "price_initial": 0.0, "location": "Madrid, España"},
+        {"id": "EDGE-zero-price-2", "type": "inmueble", "description": "Piso en Madrid",
+         "price_initial": 0.0, "location": "Madrid, España"},
+        {"id": "EDGE-no-location", "type": "inmueble", "description": "Piso en Madrid",
+         "price_initial": 1000.0},
+        {"id": "EDGE-no-type", "description": "Piso en Madrid",
+         "price_initial": 1000.0, "location": "Madrid, España"},
+        {"id": "EDGE-long", "type": "otros", "description": "lote " * 130,
+         "price_initial": 5000.0, "location": "Valencia"},
+        {"id": "EDGE-long-2", "type": "otros", "description": "lote " * 130 + "x",
+         "price_initial": 5000.0, "location": "Valencia"},
+    ])
+    return assets
+
+
+class TestOptimisationEquivalence:
+    """The pruned engine must return exactly what the reference returns"""
+
+    @pytest.mark.parametrize("threshold", [0.0, 0.5, 0.75, 0.8, 0.9, 0.99, 1.0])
+    def test_calculate_similarity_matches_reference(self, threshold):
+        """Test full pairwise scores are identical for every pair"""
+        assets = build_equivalence_catalog(size=60)
+        optimised = DeduplicationEngine(confidence_threshold=threshold)
+        reference = ReferenceEngine(confidence_threshold=threshold)
+
+        for i, a1 in enumerate(assets):
+            for a2 in assets[i + 1:]:
+                assert optimised.calculate_similarity(a1, a2) == pytest.approx(
+                    reference.calculate_similarity(a1, a2), abs=1e-12
+                )
+
+    @pytest.mark.parametrize("threshold", [0.5, 0.75, 0.8, 0.9, 0.99])
+    def test_find_duplicates_matches_reference(self, threshold):
+        """Test the pruned search finds exactly the same duplicates"""
+        assets = build_equivalence_catalog(size=500)
+        optimised = DeduplicationEngine(confidence_threshold=threshold)
+        reference = ReferenceEngine(confidence_threshold=threshold)
+
+        # Cover plain assets, seeded duplicates and the edge cases.
+        targets = [assets[0], assets[7], assets[250], assets[-1], assets[-5], assets[-9]]
+
+        for target in targets:
+            got = optimised.find_duplicates(target, assets)
+            expected = reference.find_duplicates(target, assets)
+
+            assert [a["id"] for a, _ in got] == [a["id"] for a, _ in expected]
+            for (_, got_score), (_, exp_score) in zip(got, expected):
+                assert got_score == pytest.approx(exp_score, abs=1e-12)
+
+    @pytest.mark.parametrize("threshold", [0.5, 0.8, 0.95])
+    def test_cluster_duplicates_matches_reference(self, threshold):
+        """Test clustering produces the same groups"""
+        assets = build_equivalence_catalog(size=120)
+        optimised = DeduplicationEngine(confidence_threshold=threshold)
+        reference = ReferenceEngine(confidence_threshold=threshold)
+
+        def shape(clusters):
+            return sorted(
+                sorted(asset.get("id") for asset, _ in cluster) for cluster in clusters
+            )
+
+        assert shape(optimised.cluster_duplicates(assets)) == \
+               shape(reference.cluster_duplicates(assets))
+
+    def test_pruning_actually_skips_expensive_matching(self):
+        """Test the fast path really avoids most ratio() calls"""
+        assets = build_equivalence_catalog(size=300)
+        engine = DeduplicationEngine(confidence_threshold=0.8)
+
+        calls = {"count": 0}
+        original_ratio = SequenceMatcher.ratio
+
+        def counting_ratio(self):
+            calls["count"] += 1
+            return original_ratio(self)
+
+        with patch.object(SequenceMatcher, "ratio", counting_ratio):
+            engine.find_duplicates(assets[0], assets)
+
+        # Without pruning there would be one ratio() call per candidate.
+        assert calls["count"] < len(assets) * 0.5
+
+    def test_pruning_is_disabled_when_threshold_is_zero(self):
+        """Test a zero threshold still returns every candidate"""
+        assets = build_equivalence_catalog(size=40)
+        engine = DeduplicationEngine(confidence_threshold=0.0)
+
+        found = engine.find_duplicates(assets[0], assets)
+
+        assert len(found) == len(assets) - 1

@@ -10,6 +10,7 @@ import logging
 from .db import Database
 from .scraper import create_scraper
 from .deduplication import DeduplicationEngine
+from .security import SecurityHeaders, rate_limiter
 
 # Configure logging
 logging.basicConfig(
@@ -25,27 +26,52 @@ app.config["JSON_SORT_KEYS"] = False
 # Security configuration
 MAX_QUERY_LENGTH = 1000
 MAX_EXPORT_ROWS = 50000
-RATE_LIMIT_REQUESTS = 100
-RATE_LIMIT_WINDOW = 3600  # 1 hour
+MAX_ASSET_ID_LENGTH = 100
+
+# Deduplication configuration
+MAX_DUPLICATE_CANDIDATES = 5000
+DUPLICATE_CONFIDENCE_THRESHOLD = 0.8
 
 # Initialize database and scraper
 db = Database()
 scraper = create_scraper(use_mock=True, db=db)
 
 
+# Seeding is a one-off startup concern, so it is guarded by a flag instead of
+# counting rows on every single request.
+_db_initialized = False
+
+
 def _initialize_database():
     """Populate database with initial assets if empty"""
+    global _db_initialized
     if db.get_asset_count() == 0:
         scraper.fetch_assets(save_to_db=True)
+    _db_initialized = True
 
 
 @app.before_request
 def before_request():
-    """Ensure database and scraper are initialized and log requests"""
+    """Rate limit, then ensure database and scraper are initialized"""
     logger.info(f"{request.method} {request.path} from {request.remote_addr}")
+
+    identifier = request.remote_addr or "unknown"
+    if rate_limiter.is_rate_limited(identifier):
+        retry_after = rate_limiter.retry_after(identifier)
+        response = jsonify(
+            {
+                "error": "Rate limit exceeded",
+                "code": "RATE_LIMITED",
+            }
+        )
+        response.headers["Retry-After"] = str(retry_after)
+        return response, 429
+
+    if _db_initialized:
+        return
+
     try:
-        if db.get_asset_count() == 0:
-            _initialize_database()
+        _initialize_database()
     except Exception as e:
         logger.error(f"Error initializing database in before_request: {type(e).__name__}")
         # Re-raise to trigger error handlers
@@ -55,11 +81,15 @@ def before_request():
 @app.after_request
 def add_security_headers(response):
     """Add security headers to all responses"""
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';"
+    # SecurityHeaders is the single source of truth for the header set.
+    for header, value in SecurityHeaders.get_security_headers(
+        origin=request.headers.get("Origin")
+    ).items():
+        response.headers[header] = value
+
+    remaining = rate_limiter.get_remaining(request.remote_addr or "unknown")
+    response.headers["X-RateLimit-Limit"] = str(rate_limiter.max_requests)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
     return response
 
 
@@ -431,7 +461,7 @@ def find_duplicates() -> Tuple[dict, int]:
         if not asset_id:
             return jsonify({"error": "asset_id parameter is required"}), 400
 
-        if len(asset_id) > 100:
+        if len(asset_id) > MAX_ASSET_ID_LENGTH:
             return jsonify({"error": "asset_id exceeds maximum length"}), 400
 
         # Get the target asset
@@ -439,12 +469,18 @@ def find_duplicates() -> Tuple[dict, int]:
         if not asset:
             return jsonify({"error": f"Asset {asset_id} not found"}), 404
 
-        # Get all assets to search for duplicates
-        all_assets = db.search_assets("", {})
+        # Get candidate assets to compare against. search_assets returns a
+        # (rows, total) tuple, so the list has to be unpacked explicitly.
+        candidates, _ = db.search_assets(
+            query=None,
+            filters=None,
+            limit=MAX_DUPLICATE_CANDIDATES,
+            offset=0,
+        )
 
         # Find duplicates using deduplication engine
-        engine = DeduplicationEngine(confidence_threshold=0.8)
-        duplicates = engine.find_duplicates(asset, all_assets)
+        engine = DeduplicationEngine(confidence_threshold=DUPLICATE_CONFIDENCE_THRESHOLD)
+        duplicates = engine.find_duplicates(asset, candidates)
 
         # Format response
         return (
@@ -514,9 +550,13 @@ def internal_error(error):
 
 def create_app(db_path: str = "data/assetfinder.db"):
     """Factory function to create app with custom DB path (for testing)"""
-    global db, scraper
+    global db, scraper, _db_initialized
     db = Database(db_path)
     scraper = create_scraper(use_mock=True, db=db)
+    # A fresh database has to be seeded again, so drop the one-off init flag.
+    _db_initialized = False
+    # The limiter is process-global; rebuilding the app starts a clean window.
+    rate_limiter.reset()
     return app
 
 

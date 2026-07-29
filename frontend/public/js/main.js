@@ -10,6 +10,13 @@ export class App {
         this.currentLimit = 50;
         this.lastSearchQuery = null;
         this.lastSearchFilters = null;
+        this.lastTotal = null;
+        // Monotonic counter so a slow response cannot overwrite a newer one.
+        this.searchGeneration = 0;
+    }
+
+    get currentOffset() {
+        return this.currentPage * this.currentLimit;
     }
 
     getApiBaseUrl() {
@@ -52,6 +59,7 @@ export class App {
         this.currentLimit = parseInt(document.getElementById('limit').value) || 50;
         this.lastSearchQuery = query;
         this.lastSearchFilters = filters;
+        this.lastTotal = null;
 
         await this.performSearch(query, filters);
     }
@@ -75,19 +83,32 @@ export class App {
     }
 
     async performSearch(query, filters) {
+        const generation = ++this.searchGeneration;
+
         try {
             this.uiModule.showLoading(true);
 
-            const results = await this.searchModule.search(query, filters, this.currentLimit, this.currentPage);
+            // currentOffset (page * limit), not the page index: the API paginates
+            // by record offset.
+            const offset = this.currentOffset;
+            const results = await this.searchModule.search(query, filters, this.currentLimit, offset);
 
+            // A newer search was started while this one was in flight.
+            if (generation !== this.searchGeneration) return;
+
+            this.lastTotal = results.total;
             this.uiModule.renderResults(results.assets);
             this.uiModule.updateResultsCount(results.total);
-            this.uiModule.updatePaginationControls(results.total, this.currentLimit, this.currentPage);
+            this.uiModule.updatePaginationControls(results.total, this.currentLimit, offset);
 
         } catch (error) {
+            // An aborted request was superseded on purpose, not a failure.
+            if (error.name === 'AbortError') return;
             this.uiModule.showError(`Error en la búsqueda: ${error.message}`);
         } finally {
-            this.uiModule.showLoading(false);
+            if (generation === this.searchGeneration) {
+                this.uiModule.showLoading(false);
+            }
         }
     }
 
@@ -100,6 +121,11 @@ export class App {
     }
 
     nextPage() {
+        // Do not walk past the last page once the total is known.
+        if (this.lastTotal !== null && this.currentOffset + this.currentLimit >= this.lastTotal) {
+            return;
+        }
+
         this.currentPage++;
         this.performSearch(this.lastSearchQuery, this.lastSearchFilters);
         window.scrollTo({ top: 0, behavior: 'smooth' });

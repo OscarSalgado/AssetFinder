@@ -10,7 +10,8 @@
     "test": "jest --coverage",
     "test:watch": "jest --watch",
     "test:dev": "jest --coverage --watch",
-    "coverage": "jest --coverage --coverage-reporters=text --coverage-reporters=html"
+    "coverage": "jest --coverage --coverage-reporters=text --coverage-reporters=html",
+    "bench": "node bench.mjs"
   },
   "keywords": [
     "assetfinder",

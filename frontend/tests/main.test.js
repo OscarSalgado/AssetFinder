@@ -560,3 +560,171 @@ describe('App Class Tests', () => {
         });
     });
 });
+
+describe('App pagination offset', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <form id="searchForm">
+                <input id="query" type="text" value="">
+                <select id="type"><option value="" selected></option></select>
+                <input id="priceMin" type="number" value="">
+                <input id="priceMax" type="number" value="">
+                <input id="dateFrom" type="date" value="">
+                <input id="dateTo" type="date" value="">
+                <select id="limit"><option value="50" selected>50</option></select>
+            </form>
+            <section class="results-section">
+                <div id="resultsContainer"></div>
+                <div id="resultsCount"></div>
+                <div id="loadingIndicator"></div>
+                <div id="paginationControls">
+                    <button id="prevBtn"></button>
+                    <button id="nextBtn"></button>
+                    <span id="pageInfo"></span>
+                </div>
+            </section>
+        `;
+        global.fetch = jest.fn();
+        window.scrollTo = jest.fn();
+    });
+
+    function mockPage(total) {
+        global.fetch.mockResolvedValue({
+            ok: true,
+            json: async () => ({
+                assets: [],
+                total,
+                limit: 50,
+                offset: 0,
+                sort_by: 'date_subasta',
+                sort_order: 'DESC',
+                timestamp: '2024-01-01T00:00:00Z',
+            }),
+        });
+    }
+
+    test('currentOffset is derived from page and limit', () => {
+        const app = new App();
+        app.currentLimit = 50;
+
+        app.currentPage = 0;
+        expect(app.currentOffset).toBe(0);
+
+        app.currentPage = 3;
+        expect(app.currentOffset).toBe(150);
+    });
+
+    test('page 2 requests offset=limit, not offset=1', async () => {
+        mockPage(500);
+        const app = new App();
+        app.currentLimit = 50;
+        app.currentPage = 1;
+
+        await app.performSearch('piso', {});
+
+        const requestedUrl = global.fetch.mock.calls[0][0];
+        expect(requestedUrl).toContain('offset=50');
+        expect(requestedUrl).not.toContain('offset=1&');
+    });
+
+    test('pagination controls receive the record offset', async () => {
+        mockPage(500);
+        const app = new App();
+        app.currentLimit = 50;
+        app.currentPage = 2;
+        const spy = jest.spyOn(app.uiModule, 'updatePaginationControls');
+
+        await app.performSearch('piso', {});
+
+        expect(spy).toHaveBeenCalledWith(500, 50, 100);
+    });
+
+    test('page info reflects the real page number', async () => {
+        mockPage(500);
+        const app = new App();
+        app.currentLimit = 50;
+        app.currentPage = 4;
+
+        await app.performSearch('piso', {});
+
+        expect(document.getElementById('pageInfo').textContent).toBe('Página 5 de 10');
+    });
+
+    test('nextPage does not advance past the last page', async () => {
+        mockPage(100);
+        const app = new App();
+        app.currentLimit = 50;
+        app.lastSearchQuery = 'piso';
+        app.lastSearchFilters = {};
+
+        await app.performSearch('piso', {});
+        expect(app.lastTotal).toBe(100);
+
+        app.currentPage = 1;  // last page: offset 50 + limit 50 >= 100
+        app.nextPage();
+
+        expect(app.currentPage).toBe(1);
+        expect(window.scrollTo).not.toHaveBeenCalled();
+    });
+
+    test('nextPage advances while the total is still unknown', () => {
+        mockPage(500);
+        const app = new App();
+        app.lastSearchQuery = 'piso';
+        app.lastSearchFilters = {};
+
+        expect(app.lastTotal).toBeNull();
+        app.nextPage();
+
+        expect(app.currentPage).toBe(1);
+    });
+
+    test('handleSearch resets page and total', async () => {
+        mockPage(500);
+        const app = new App();
+        app.currentPage = 7;
+        app.lastTotal = 999;
+
+        await app.handleSearch({ preventDefault: jest.fn() });
+
+        expect(app.currentPage).toBe(0);
+        expect(app.lastTotal).toBe(500);
+    });
+
+    test('a superseded response does not overwrite newer results', async () => {
+        const app = new App();
+        const renderSpy = jest.spyOn(app.uiModule, 'renderResults');
+
+        // First search resolves late, after a second one already ran.
+        let resolveFirst;
+        global.fetch.mockImplementationOnce(() => new Promise((resolve) => {
+            resolveFirst = resolve;
+        }));
+
+        const firstSearch = app.performSearch('vieja', {});
+
+        mockPage(1);
+        await app.performSearch('nueva', {});
+        const rendersAfterSecond = renderSpy.mock.calls.length;
+
+        resolveFirst({
+            ok: true,
+            json: async () => ({ assets: [{ id: 'STALE' }], total: 1 }),
+        });
+        await firstSearch;
+
+        expect(renderSpy.mock.calls.length).toBe(rendersAfterSecond);
+    });
+
+    test('an aborted search does not surface an error message', async () => {
+        const app = new App();
+        const errorSpy = jest.spyOn(app.uiModule, 'showError');
+        const abortError = new Error('aborted');
+        abortError.name = 'AbortError';
+        global.fetch.mockRejectedValue(abortError);
+
+        await app.performSearch('piso', {});
+
+        expect(errorSpy).not.toHaveBeenCalled();
+    });
+});

@@ -1,3 +1,28 @@
+// Intl formatters are expensive to construct and were previously rebuilt on
+// every cell (~150 per page of 50 results). Built once, reused for the page.
+const PRICE_FORMATTER = new Intl.NumberFormat('es-ES', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+});
+
+const DATE_FORMATTER = new Intl.DateTimeFormat('es-ES', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+});
+
+// Static escape table: avoids creating a throwaway DOM element per call
+// (escapeHtml runs ~6 times per card).
+const HTML_ESCAPES = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+};
+
+const HTML_ESCAPE_PATTERN = /[&<>"']/g;
+
 export class UIModule {
     constructor() {
         this.resultsContainer = document.getElementById('resultsContainer');
@@ -69,7 +94,7 @@ export class UIModule {
 
     formatPrice(price) {
         if (!price || price === 0) return '€ 0,00';
-        return `€ ${parseFloat(price).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        return `€ ${PRICE_FORMATTER.format(parseFloat(price))}`;
     }
 
     formatDate(dateString) {
@@ -79,11 +104,7 @@ export class UIModule {
             if (isNaN(date.getTime())) {
                 return dateString;
             }
-            return date.toLocaleDateString('es-ES', {
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric',
-            });
+            return DATE_FORMATTER.format(date);
         } catch {
             return dateString;
         }
@@ -194,8 +215,6 @@ export class UIModule {
 
     escapeHtml(text) {
         if (!text) return '';
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
+        return String(text).replace(HTML_ESCAPE_PATTERN, (char) => HTML_ESCAPES[char]);
     }
 }

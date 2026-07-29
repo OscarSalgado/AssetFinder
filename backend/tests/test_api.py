@@ -751,3 +751,230 @@ class TestSecurityHardening:
             data = response.get_json()
             assert "Failed to retrieve search history" in data["error"]
             assert "Query execution failed" not in data["error"]
+
+
+class TestDuplicatesEndpoint:
+    """Test /api/duplicates endpoint"""
+
+    def test_duplicates_returns_200(self, client):
+        """Test duplicates endpoint returns 200 for an existing asset"""
+        response = client.get("/api/duplicates?asset_id=SSSS-2024-001")
+        assert response.status_code == 200
+
+    def test_duplicates_response_structure(self, client):
+        """Test duplicates response contains the expected keys"""
+        response = client.get("/api/duplicates?asset_id=SSSS-2024-001")
+        data = response.get_json()
+
+        assert data["asset_id"] == "SSSS-2024-001"
+        assert data["asset"]["id"] == "SSSS-2024-001"
+        assert "duplicate_count" in data
+        assert "duplicates" in data
+        assert "timestamp" in data
+        assert isinstance(data["duplicates"], list)
+        assert data["duplicate_count"] == len(data["duplicates"])
+
+    def test_duplicates_no_duplicates_in_mock_data(self, client):
+        """Test mock catalogue has no duplicates above the threshold"""
+        response = client.get("/api/duplicates?asset_id=SSSS-2024-001")
+        data = response.get_json()
+
+        assert data["duplicate_count"] == 0
+        assert data["duplicates"] == []
+
+    def test_duplicates_finds_seeded_duplicate(self, client):
+        """Test a near-identical asset is reported as a duplicate"""
+        import src.api as api_module
+
+        # Fetching through the API also triggers the lazy DB initialisation.
+        original = client.get("/api/assets/SSSS-2024-001").get_json()["asset"]
+
+        near_copy = dict(original)
+        near_copy["id"] = "SSSS-2024-001-COPY"
+        near_copy["description"] = original["description"] + "."
+        api_module.db.insert_asset(near_copy)
+
+        response = client.get("/api/duplicates?asset_id=SSSS-2024-001")
+        data = response.get_json()
+
+        assert data["duplicate_count"] == 1
+        duplicate = data["duplicates"][0]
+        assert duplicate["id"] == "SSSS-2024-001-COPY"
+        assert duplicate["confidence"] >= 0.8
+        assert duplicate["type"] == original["type"]
+        assert duplicate["location"] == original["location"]
+
+    def test_duplicates_excludes_self(self, client):
+        """Test the asset itself is never reported as its own duplicate"""
+        response = client.get("/api/duplicates?asset_id=SSSS-2024-001")
+        data = response.get_json()
+
+        assert all(d["id"] != "SSSS-2024-001" for d in data["duplicates"])
+
+    def test_duplicates_missing_asset_id_returns_400(self, client):
+        """Test missing asset_id parameter returns 400"""
+        response = client.get("/api/duplicates")
+        assert response.status_code == 400
+        assert "required" in response.get_json()["error"]
+
+    def test_duplicates_blank_asset_id_returns_400(self, client):
+        """Test whitespace-only asset_id returns 400"""
+        response = client.get("/api/duplicates?asset_id=%20%20")
+        assert response.status_code == 400
+
+    def test_duplicates_oversized_asset_id_returns_400(self, client):
+        """Test asset_id above the length limit returns 400"""
+        response = client.get(f"/api/duplicates?asset_id={'x' * 150}")
+        assert response.status_code == 400
+        assert "maximum length" in response.get_json()["error"]
+
+    def test_duplicates_unknown_asset_returns_404(self, client):
+        """Test unknown asset_id returns 404"""
+        response = client.get("/api/duplicates?asset_id=DOES-NOT-EXIST")
+        assert response.status_code == 404
+        assert "not found" in response.get_json()["error"]
+
+    def test_duplicates_value_error_returns_400(self, client):
+        """Test ValueError from the engine is surfaced as 400"""
+        with patch("src.api.DeduplicationEngine") as mock_engine:
+            mock_engine.side_effect = ValueError("confidence_threshold must be between 0 and 1")
+            response = client.get("/api/duplicates?asset_id=SSSS-2024-001")
+            assert response.status_code == 400
+
+    def test_duplicates_error_handling_sanitizes_message(self, client):
+        """Test unexpected errors return a generic message"""
+        with patch("src.api.db.search_assets") as mock_search:
+            mock_search.side_effect = Exception("Internal table corrupted")
+            response = client.get("/api/duplicates?asset_id=SSSS-2024-001")
+            assert response.status_code == 500
+            data = response.get_json()
+            assert data["code"] == "DUPLICATE_ERROR"
+            assert "Internal table corrupted" not in data["error"]
+
+
+class TestRateLimiting:
+    """Test the rate limiter wired into the API"""
+
+    def test_requests_within_limit_are_allowed(self, client):
+        """Test normal traffic is not rate limited"""
+        for _ in range(5):
+            assert client.get("/api/health").status_code == 200
+
+    def test_exceeding_the_limit_returns_429(self, client):
+        """Test the limit is enforced with a 429"""
+        from src.security import rate_limiter
+
+        for _ in range(rate_limiter.max_requests):
+            client.get("/api/health")
+
+        response = client.get("/api/health")
+
+        assert response.status_code == 429
+        assert response.get_json()["code"] == "RATE_LIMITED"
+
+    def test_rate_limited_response_has_retry_after(self, client):
+        """Test a throttled response tells the client when to retry"""
+        from src.security import rate_limiter
+
+        for _ in range(rate_limiter.max_requests + 1):
+            response = client.get("/api/health")
+
+        assert response.status_code == 429
+        assert int(response.headers["Retry-After"]) > 0
+
+    def test_rate_limit_headers_are_exposed(self, client):
+        """Test remaining quota is advertised on normal responses"""
+        from src.security import rate_limiter
+
+        response = client.get("/api/health")
+
+        assert response.headers["X-RateLimit-Limit"] == str(rate_limiter.max_requests)
+        assert int(response.headers["X-RateLimit-Remaining"]) < rate_limiter.max_requests
+
+    def test_creating_the_app_resets_the_window(self, temp_db):
+        """Test each app instance starts with a clean rate limit window"""
+        from src.security import rate_limiter
+
+        app = create_app(temp_db)
+        app.config["TESTING"] = True
+
+        with app.test_client() as first:
+            for _ in range(rate_limiter.max_requests + 1):
+                first.get("/api/health")
+
+        app = create_app(temp_db)
+        app.config["TESTING"] = True
+
+        with app.test_client() as second:
+            assert second.get("/api/health").status_code == 200
+
+
+class TestSecurityHeadersWiring:
+    """Test responses carry the shared security header set"""
+
+    def test_core_security_headers_are_present(self, client):
+        """Test the hardened header set is applied"""
+        response = client.get("/api/health")
+
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+        assert response.headers["X-Frame-Options"] == "DENY"
+        assert "max-age=31536000" in response.headers["Strict-Transport-Security"]
+        assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+        assert "Permissions-Policy" in response.headers
+
+    def test_csp_blocks_framing_and_inline_scripts(self, client):
+        """Test the CSP from SecurityHeaders is the one served"""
+        csp = client.get("/api/health").headers["Content-Security-Policy"]
+
+        assert "frame-ancestors 'none'" in csp
+        assert "script-src 'self'" in csp
+        assert "base-uri 'self'" in csp
+
+    def test_cors_allowed_only_for_the_known_origin(self, client):
+        """Test CORS headers are not handed out to arbitrary origins"""
+        allowed = client.get("/api/health", headers={"Origin": "http://localhost:3000"})
+        assert allowed.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
+
+        rejected = client.get("/api/health", headers={"Origin": "https://evil.example"})
+        assert "Access-Control-Allow-Origin" not in rejected.headers
+
+
+class TestStartupInitialisation:
+    """Test the one-off database seeding guard"""
+
+    def test_database_is_seeded_once_not_per_request(self, client):
+        """Test the row count is not queried on every request"""
+        import src.api as api_module
+
+        client.get("/api/health")  # triggers the one-off initialisation
+
+        with patch.object(api_module.db, "get_asset_count") as mock_count:
+            for _ in range(5):
+                assert client.get("/api/health").status_code == 200
+
+            mock_count.assert_not_called()
+
+    def test_initialisation_failure_propagates_as_500(self, temp_db):
+        """Test a failure while seeding surfaces as an internal error"""
+        import src.api as api_module
+
+        app = create_app(temp_db)
+        app.config["TESTING"] = True
+        # TESTING re-raises instead of producing the response a client would get.
+        app.config["PROPAGATE_EXCEPTIONS"] = False
+
+        with patch.object(api_module.db, "get_asset_count") as mock_count:
+            mock_count.side_effect = RuntimeError("disk gone")
+
+            with app.test_client() as client:
+                response = client.get("/api/health")
+
+            assert response.status_code == 500
+
+    def test_seeding_populates_the_catalogue(self, client):
+        """Test the first request leaves the database populated"""
+        import src.api as api_module
+
+        client.get("/api/health")
+
+        assert api_module.db.get_asset_count() > 0

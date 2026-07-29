@@ -290,11 +290,21 @@ describe('UIModule', () => {
             expect(formatted2).toContain('2024');
         });
 
-        test('handles toLocaleDateString exception', () => {
-            // Mock Date to have a toLocaleDateString that throws
-            const originalDatePrototype = Date.prototype.toLocaleDateString;
-            Date.prototype.toLocaleDateString = jest.fn(() => {
-                throw new Error('Locale error');
+        test('handles date formatting exception', () => {
+            // formatDate uses a cached Intl.DateTimeFormat, so the failure has to
+            // be injected into the formatter itself rather than into Date.
+            // `format` is an accessor on the prototype, hence defineProperty.
+            const descriptor = Object.getOwnPropertyDescriptor(
+                Intl.DateTimeFormat.prototype,
+                'format'
+            );
+            Object.defineProperty(Intl.DateTimeFormat.prototype, 'format', {
+                configurable: true,
+                get() {
+                    return () => {
+                        throw new Error('Locale error');
+                    };
+                },
             });
 
             const formatted = uiModule.formatDate('2024-03-15');
@@ -303,7 +313,7 @@ describe('UIModule', () => {
             expect(formatted).toBe('2024-03-15');
 
             // Restore original
-            Date.prototype.toLocaleDateString = originalDatePrototype;
+            Object.defineProperty(Intl.DateTimeFormat.prototype, 'format', descriptor);
         });
     });
 
@@ -551,5 +561,80 @@ describe('UIModule', () => {
             const badge = uiModule.getAssetTypeBadge('unknown_type');
             expect(badge).toBe('unknown_type');
         });
+    });
+});
+
+describe('UIModule escapeHtml attribute safety', () => {
+    let uiModule;
+
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="resultsContainer"></div>
+            <div id="resultsCount"></div>
+            <div id="loadingIndicator"></div>
+            <div id="paginationControls"></div>
+            <div id="historyContainer"></div>
+        `;
+        uiModule = new UIModule();
+    });
+
+    test('escapes the five HTML-significant characters', () => {
+        expect(uiModule.escapeHtml('&')).toBe('&amp;');
+        expect(uiModule.escapeHtml('<')).toBe('&lt;');
+        expect(uiModule.escapeHtml('>')).toBe('&gt;');
+        expect(uiModule.escapeHtml('"')).toBe('&quot;');
+        expect(uiModule.escapeHtml("'")).toBe('&#39;');
+    });
+
+    test('escapes quotes so attribute values cannot be broken out of', () => {
+        // escapeHtml output is interpolated into data-asset-id and class
+        // attributes, so unescaped quotes would allow attribute injection.
+        const payload = 'x" onmouseover="alert(1)';
+
+        expect(uiModule.escapeHtml(payload)).not.toContain('"');
+    });
+
+    test('a malicious asset id does not inject an attribute into the card', () => {
+        uiModule.renderResults([
+            {
+                id: 'x" onmouseover="alert(1)',
+                type: 'inmueble',
+                description: 'Piso en Madrid',
+                price_initial: 1000,
+                price_min: 900,
+                date_subasta: '2024-03-15',
+                location: 'Madrid',
+            },
+        ]);
+
+        const card = document.querySelector('.asset-card');
+        expect(card.hasAttribute('onmouseover')).toBe(false);
+        expect(card.getAttribute('data-asset-id')).toBe('x" onmouseover="alert(1)');
+    });
+
+    test('script tags in descriptions are rendered inert', () => {
+        uiModule.renderResults([
+            {
+                id: 'SAFE-1',
+                type: 'inmueble',
+                description: '<script>alert(1)</script>',
+                price_initial: 1000,
+                price_min: 900,
+                date_subasta: '2024-03-15',
+                location: 'Madrid',
+            },
+        ]);
+
+        expect(document.querySelector('#resultsContainer script')).toBeNull();
+    });
+
+    test('returns an empty string for falsy input', () => {
+        expect(uiModule.escapeHtml('')).toBe('');
+        expect(uiModule.escapeHtml(null)).toBe('');
+        expect(uiModule.escapeHtml(undefined)).toBe('');
+    });
+
+    test('leaves ordinary text untouched', () => {
+        expect(uiModule.escapeHtml('Piso en Madrid centro')).toBe('Piso en Madrid centro');
     });
 });

@@ -1,11 +1,13 @@
 """Security tests for AssetFinder API"""
 
 import pytest
+from unittest.mock import patch
 from src.security import (
     RateLimiter,
     InputValidator,
     SecurityHeaders,
     sanitize_error_message,
+    log_security_event,
     hash_sensitive_data,
 )
 
@@ -293,3 +295,194 @@ class TestDataHashing:
         hash1 = hash_sensitive_data("value1")
         hash2 = hash_sensitive_data("value2")
         assert hash1 != hash2
+
+
+class TestRateLimiterEfficiency:
+    """Test the deque-based sliding window and its memory behaviour"""
+
+    def test_expired_timestamps_are_dropped(self):
+        """Test the window slides instead of growing forever"""
+        limiter = RateLimiter(max_requests=3, window_seconds=60)
+
+        with patch("src.security.time.time", return_value=1000.0):
+            for _ in range(3):
+                limiter.is_rate_limited("user1")
+            assert limiter.is_rate_limited("user1") is True
+
+        # Past the window: the old requests no longer count.
+        with patch("src.security.time.time", return_value=1100.0):
+            assert limiter.is_rate_limited("user1") is False
+            assert len(limiter.requests["user1"]) == 1
+
+    def test_unknown_identifier_is_not_tracked(self):
+        """Test get_remaining does not create an entry for unseen callers"""
+        limiter = RateLimiter(max_requests=10, window_seconds=60)
+
+        assert limiter.get_remaining("never-seen") == 10
+        assert "never-seen" not in limiter.requests
+
+    def test_get_remaining_decreases_with_usage(self):
+        """Test remaining quota reflects requests made"""
+        limiter = RateLimiter(max_requests=5, window_seconds=60)
+
+        limiter.is_rate_limited("user1")
+        limiter.is_rate_limited("user1")
+
+        assert limiter.get_remaining("user1") == 3
+
+    def test_get_remaining_forgets_fully_expired_identifiers(self):
+        """Test an identifier with nothing left in the window is dropped"""
+        limiter = RateLimiter(max_requests=5, window_seconds=60)
+
+        with patch("src.security.time.time", return_value=1000.0):
+            limiter.is_rate_limited("user1")
+
+        with patch("src.security.time.time", return_value=1100.0):
+            assert limiter.get_remaining("user1") == 5
+
+        assert "user1" not in limiter.requests
+
+    def test_purge_expired_reclaims_silent_identifiers(self):
+        """Test the sweep bounds memory for callers that went away"""
+        limiter = RateLimiter(max_requests=5, window_seconds=60)
+
+        with patch("src.security.time.time", return_value=1000.0):
+            for i in range(50):
+                limiter.is_rate_limited(f"user{i}")
+
+        assert len(limiter.requests) == 50
+
+        with patch("src.security.time.time", return_value=1100.0):
+            dropped = limiter.purge_expired()
+
+        assert dropped == 50
+        assert len(limiter.requests) == 0
+
+    def test_purge_keeps_identifiers_still_inside_the_window(self):
+        """Test the sweep does not discard active callers"""
+        limiter = RateLimiter(max_requests=5, window_seconds=60)
+
+        with patch("src.security.time.time", return_value=1000.0):
+            limiter.is_rate_limited("stale")
+
+        with patch("src.security.time.time", return_value=1090.0):
+            limiter.is_rate_limited("active")
+            assert limiter.purge_expired() == 1
+
+        assert "active" in limiter.requests
+        assert "stale" not in limiter.requests
+
+    def test_sweep_runs_automatically(self):
+        """Test the limiter sweeps itself without an explicit call"""
+        limiter = RateLimiter(max_requests=10_000, window_seconds=60)
+        limiter.SWEEP_INTERVAL = 10
+
+        with patch("src.security.time.time", return_value=1000.0):
+            for i in range(9):
+                limiter.is_rate_limited(f"user{i}")
+            assert len(limiter.requests) == 9
+
+        # The 10th check triggers a sweep, by which time the earlier ones expired.
+        with patch("src.security.time.time", return_value=1100.0):
+            limiter.is_rate_limited("newcomer")
+
+        assert list(limiter.requests) == ["newcomer"]
+
+    def test_retry_after_is_within_the_window(self):
+        """Test retry_after reports when the oldest request expires"""
+        limiter = RateLimiter(max_requests=1, window_seconds=60)
+
+        with patch("src.security.time.time", return_value=1000.0):
+            limiter.is_rate_limited("user1")
+
+        with patch("src.security.time.time", return_value=1030.0):
+            assert limiter.retry_after("user1") == 30
+
+    def test_retry_after_is_zero_for_unknown_identifier(self):
+        """Test retry_after on an untracked caller"""
+        limiter = RateLimiter(max_requests=1, window_seconds=60)
+
+        assert limiter.retry_after("never-seen") == 0
+
+    def test_retry_after_is_at_least_one_second(self):
+        """Test retry_after never tells the client to retry immediately"""
+        limiter = RateLimiter(max_requests=1, window_seconds=60)
+
+        with patch("src.security.time.time", return_value=1000.0):
+            limiter.is_rate_limited("user1")
+
+        with patch("src.security.time.time", return_value=1059.9):
+            assert limiter.retry_after("user1") == 1
+
+    def test_reset_clears_all_state(self):
+        """Test reset drops every tracked identifier"""
+        limiter = RateLimiter(max_requests=5, window_seconds=60)
+        limiter.is_rate_limited("user1")
+        limiter.is_rate_limited("user2")
+
+        limiter.reset()
+
+        assert len(limiter.requests) == 0
+        assert limiter.get_remaining("user1") == 5
+
+    def test_timestamps_are_stored_in_a_deque(self):
+        """Test the window uses a deque so expiry is O(1) per entry"""
+        from collections import deque
+
+        limiter = RateLimiter(max_requests=5, window_seconds=60)
+        limiter.is_rate_limited("user1")
+
+        assert isinstance(limiter.requests["user1"], deque)
+
+
+class TestValidateAssetIdLimits:
+    """Test asset id validation boundaries"""
+
+    def test_oversized_asset_id_is_rejected(self):
+        """Test an id above MAX_ID_LENGTH is refused"""
+        valid, message = InputValidator.validate_asset_id("x" * 101)
+
+        assert valid is False
+        assert "exceeds max length" in message
+
+    def test_asset_id_at_the_limit_is_accepted(self):
+        """Test an id exactly at MAX_ID_LENGTH passes"""
+        asset_id = "x" * 100
+        valid, value = InputValidator.validate_asset_id(asset_id)
+
+        assert valid is True
+        assert value == asset_id
+
+
+class TestLogSecurityEvent:
+    """Test the security event logger"""
+
+    def test_warning_level_is_logged_as_warning(self):
+        """Test WARNING events go to logger.warning"""
+        with patch("src.security.logger") as mock_logger:
+            log_security_event("RATE_LIMIT", {"ip": "1.2.3.4"}, level="WARNING")
+
+            mock_logger.warning.assert_called_once()
+
+    def test_error_level_is_logged_as_error(self):
+        """Test ERROR events go to logger.error"""
+        with patch("src.security.logger") as mock_logger:
+            log_security_event("INJECTION", {"query": "drop"}, level="ERROR")
+
+            mock_logger.error.assert_called_once()
+
+    def test_default_level_is_info(self):
+        """Test unspecified level goes to logger.info"""
+        with patch("src.security.logger") as mock_logger:
+            log_security_event("LOGIN", {"user": "abc"})
+
+            mock_logger.info.assert_called_once()
+
+    def test_event_type_and_details_are_included(self):
+        """Test the formatted message carries the event context"""
+        with patch("src.security.logger") as mock_logger:
+            log_security_event("SCAN", {"path": "/admin"})
+
+            message = mock_logger.info.call_args[0][0]
+            assert "SCAN" in message
+            assert "/admin" in message

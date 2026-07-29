@@ -133,12 +133,7 @@ class Scraper:
 
         # Save to database if requested
         if save_to_db and self.db:
-            for asset in results:
-                try:
-                    self.db.insert_asset(asset)
-                except Exception:
-                    # Skip DB errors, continue with next asset
-                    pass
+            self._persist(results)
 
         self.last_scraped = datetime.utcnow()
         return results
@@ -147,7 +142,7 @@ class Scraper:
         self, query: Optional[str], filters: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         """Fetch mock assets (Delta 0.2 compatibility)"""
-        results = MOCK_ASSETS.copy()
+        results = MOCK_ASSETS
 
         # Filter by query
         if query:
@@ -196,7 +191,11 @@ class Scraper:
                 if asset["date_subasta"] <= filters["date_to"]
             ]
 
-        return results
+        # Return copies: callers mutate the returned dicts (created_at/updated_at)
+        # and MOCK_ASSETS is module-level state that must stay pristine. A shallow
+        # copy per asset is enough because every value is an immutable scalar,
+        # and only the assets that survived filtering are copied.
+        return [dict(asset) for asset in results]
 
     def _fetch_real_assets(
         self, query: Optional[str], filters: Dict[str, Any]
@@ -251,6 +250,33 @@ class Scraper:
         except requests.RequestException:
             return None
 
+    def _persist(self, assets: List[Dict[str, Any]]) -> int:
+        """
+        Write assets to the database in a single transaction.
+
+        Falls back to inserting one by one so that a single malformed asset does
+        not discard the whole batch, preserving the previous skip-and-continue
+        behaviour without paying a commit per row in the common case.
+
+        Returns:
+            Number of assets written
+        """
+        if not assets:
+            return 0
+
+        try:
+            return self.db.insert_assets(assets)
+        except Exception:
+            count = 0
+            for asset in assets:
+                try:
+                    self.db.insert_asset(asset)
+                    count += 1
+                except Exception:
+                    # Skip DB errors, continue with next asset
+                    pass
+            return count
+
     def is_healthy(self) -> bool:
         """Check if scraper is operational"""
         return True
@@ -270,16 +296,7 @@ class Scraper:
             assets = self.fetch_assets()
 
             # Save to database
-            count = 0
-            for asset in assets:
-                try:
-                    self.db.insert_asset(asset)
-                    count += 1
-                except Exception:
-                    # Continue on DB errors
-                    pass
-
-            return count
+            return self._persist(assets)
         except Exception:
             return 0
 

@@ -428,3 +428,79 @@ describe('SearchModule', () => {
         });
     });
 });
+
+describe('SearchModule request cancellation', () => {
+    let searchModule;
+
+    beforeEach(() => {
+        searchModule = new SearchModule('http://localhost:5000/api');
+        global.fetch = jest.fn();
+    });
+
+    test('search registers an in-flight controller', async () => {
+        let capturedSignal = null;
+        global.fetch.mockImplementation((url, options) => {
+            capturedSignal = options.signal;
+            return Promise.resolve({
+                ok: true,
+                json: async () => ({ assets: [], total: 0 }),
+            });
+        });
+
+        await searchModule.search('piso');
+
+        expect(capturedSignal).toBeInstanceOf(AbortSignal);
+        expect(capturedSignal.aborted).toBe(false);
+    });
+
+    test('search clears the in-flight controller when it settles', async () => {
+        global.fetch.mockResolvedValue({
+            ok: true,
+            json: async () => ({ assets: [], total: 0 }),
+        });
+
+        await searchModule.search('piso');
+
+        expect(searchModule.inFlightSearch).toBeNull();
+    });
+
+    test('a new search aborts the previous in-flight request', async () => {
+        const signals = [];
+        global.fetch.mockImplementation((url, options) => {
+            signals.push(options.signal);
+            // Never settles: keeps the request in flight.
+            return new Promise(() => {});
+        });
+
+        searchModule.search('primera');
+        searchModule.search('segunda');
+
+        expect(signals).toHaveLength(2);
+        expect(signals[0].aborted).toBe(true);
+        expect(signals[1].aborted).toBe(false);
+    });
+
+    test('abortInFlightSearch is a no-op when nothing is in flight', () => {
+        expect(searchModule.inFlightSearch).toBeNull();
+        expect(() => searchModule.abortInFlightSearch()).not.toThrow();
+        expect(searchModule.inFlightSearch).toBeNull();
+    });
+
+    test('AbortError is rethrown unwrapped so callers can detect it', async () => {
+        const abortError = new Error('The operation was aborted');
+        abortError.name = 'AbortError';
+        global.fetch.mockRejectedValue(abortError);
+
+        await expect(searchModule.search('piso')).rejects.toMatchObject({
+            name: 'AbortError',
+        });
+    });
+
+    test('non-abort errors are still wrapped with context', async () => {
+        global.fetch.mockRejectedValue(new Error('Network down'));
+
+        await expect(searchModule.search('piso')).rejects.toThrow(
+            'Failed to search assets: Network down'
+        );
+    });
+});

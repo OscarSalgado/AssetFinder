@@ -586,11 +586,11 @@ class TestDatabaseErrorHandling:
         db = Database(db_path)
 
         # Mock get_connection to return a connection that raises error
-        with patch.object(db, "get_connection") as mock_get_conn:
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
             mock_conn = MagicMock()
             mock_cursor = MagicMock()
 
-            mock_get_conn.return_value = mock_conn
+            mock_shared_conn.return_value = mock_conn
             mock_conn.cursor.return_value = mock_cursor
             mock_cursor.execute.side_effect = sqlite3.Error("Insert error")
 
@@ -602,11 +602,11 @@ class TestDatabaseErrorHandling:
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
 
-        with patch.object(db, "get_connection") as mock_get_conn:
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
             mock_conn = MagicMock()
             mock_cursor = MagicMock()
 
-            mock_get_conn.return_value = mock_conn
+            mock_shared_conn.return_value = mock_conn
             mock_conn.cursor.return_value = mock_cursor
             mock_cursor.execute.side_effect = sqlite3.Error("Get error")
 
@@ -618,11 +618,11 @@ class TestDatabaseErrorHandling:
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
 
-        with patch.object(db, "get_connection") as mock_get_conn:
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
             mock_conn = MagicMock()
             mock_cursor = MagicMock()
 
-            mock_get_conn.return_value = mock_conn
+            mock_shared_conn.return_value = mock_conn
             mock_conn.cursor.return_value = mock_cursor
             mock_cursor.execute.side_effect = sqlite3.Error("Search error")
 
@@ -634,11 +634,11 @@ class TestDatabaseErrorHandling:
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
 
-        with patch.object(db, "get_connection") as mock_get_conn:
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
             mock_conn = MagicMock()
             mock_cursor = MagicMock()
 
-            mock_get_conn.return_value = mock_conn
+            mock_shared_conn.return_value = mock_conn
             mock_conn.cursor.return_value = mock_cursor
             mock_cursor.execute.side_effect = sqlite3.Error("History error")
 
@@ -650,11 +650,11 @@ class TestDatabaseErrorHandling:
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
 
-        with patch.object(db, "get_connection") as mock_get_conn:
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
             mock_conn = MagicMock()
             mock_cursor = MagicMock()
 
-            mock_get_conn.return_value = mock_conn
+            mock_shared_conn.return_value = mock_conn
             mock_conn.cursor.return_value = mock_cursor
             mock_cursor.execute.side_effect = sqlite3.Error("History error")
 
@@ -666,11 +666,11 @@ class TestDatabaseErrorHandling:
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
 
-        with patch.object(db, "get_connection") as mock_get_conn:
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
             mock_conn = MagicMock()
             mock_cursor = MagicMock()
 
-            mock_get_conn.return_value = mock_conn
+            mock_shared_conn.return_value = mock_conn
             mock_conn.cursor.return_value = mock_cursor
             mock_cursor.execute.side_effect = sqlite3.Error("Delete error")
 
@@ -682,13 +682,164 @@ class TestDatabaseErrorHandling:
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
 
-        with patch.object(db, "get_connection") as mock_get_conn:
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
             mock_conn = MagicMock()
             mock_cursor = MagicMock()
 
-            mock_get_conn.return_value = mock_conn
+            mock_shared_conn.return_value = mock_conn
             mock_conn.cursor.return_value = mock_cursor
             mock_cursor.execute.side_effect = sqlite3.Error("Count error")
 
             with pytest.raises(RuntimeError, match="Failed to get asset count"):
                 db.get_asset_count()
+
+
+class TestBatchInsert:
+    """Test insert_assets batch writes"""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        """Create test database"""
+        return Database(str(tmp_path / "test.db"))
+
+    def test_insert_assets_writes_all_rows(self, db, mock_assets):
+        """Test batch insert persists every asset"""
+        written = db.insert_assets(mock_assets)
+
+        assert written == len(mock_assets)
+        assert db.get_asset_count() == len(mock_assets)
+
+    def test_insert_assets_empty_list_returns_zero(self, db):
+        """Test batch insert of nothing is a no-op"""
+        assert db.insert_assets([]) == 0
+        assert db.get_asset_count() == 0
+
+    def test_insert_assets_is_equivalent_to_insert_asset(self, tmp_path, mock_assets):
+        """Test batch and per-row inserts produce the same rows"""
+        per_row = Database(str(tmp_path / "rows.db"))
+        for asset in mock_assets:
+            per_row.insert_asset(asset)
+
+        batch = Database(str(tmp_path / "batch.db"))
+        batch.insert_assets(mock_assets)
+
+        rows_a, total_a = per_row.search_assets(sort_by="id", sort_order="ASC")
+        rows_b, total_b = batch.search_assets(sort_by="id", sort_order="ASC")
+
+        assert total_a == total_b
+        # created_at/updated_at are generated, so compare the payload columns.
+        payload = ("id", "type", "description", "price_initial", "price_min",
+                   "date_subasta", "location")
+        assert [{k: r[k] for k in payload} for r in rows_a] == \
+               [{k: r[k] for k in payload} for r in rows_b]
+
+    def test_insert_assets_replaces_existing(self, db, mock_asset):
+        """Test batch insert upserts on conflicting id"""
+        db.insert_asset(mock_asset)
+        updated = dict(mock_asset)
+        updated["description"] = "Descripcion actualizada"
+
+        db.insert_assets([updated])
+
+        assert db.get_asset_count() == 1
+        assert db.get_asset("TEST-001")["description"] == "Descripcion actualizada"
+
+    def test_insert_assets_missing_field_raises_value_error(self, db):
+        """Test batch insert validates required fields"""
+        with pytest.raises(ValueError, match="Missing required field"):
+            db.insert_assets([{"id": "X", "type": "otros"}])
+
+    def test_insert_assets_rejects_batch_atomically(self, db, mock_asset):
+        """Test a malformed asset aborts the whole batch"""
+        with pytest.raises(ValueError):
+            db.insert_assets([mock_asset, {"id": "BAD"}])
+
+        # Validation happens before any write, so nothing was persisted.
+        assert db.get_asset_count() == 0
+
+    def test_insert_assets_sqlite_error(self, tmp_path, mock_assets):
+        """Test that sqlite3.Error in insert_assets raises RuntimeError"""
+        db = Database(str(tmp_path / "test.db"))
+
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+
+            mock_shared_conn.return_value = mock_conn
+            mock_conn.cursor.return_value = mock_cursor
+            mock_cursor.executemany.side_effect = sqlite3.Error("Batch error")
+
+            with pytest.raises(RuntimeError, match="Failed to insert assets"):
+                db.insert_assets(mock_assets)
+
+
+class TestConnectionReuse:
+    """Test the pooled connection introduced for efficiency"""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        """Create test database"""
+        return Database(str(tmp_path / "test.db"))
+
+    def test_shared_connection_is_reused(self, db):
+        """Test repeated calls return the same connection object"""
+        assert db._shared_connection() is db._shared_connection()
+
+    def test_get_connection_returns_a_fresh_connection(self, db):
+        """Test the public accessor still hands out caller-owned connections"""
+        first = db.get_connection()
+        second = db.get_connection()
+
+        assert first is not second
+        first.close()
+        second.close()
+
+    def test_get_connection_is_independent_of_the_pool(self, db, mock_asset):
+        """Test closing a caller-owned connection does not break the pool"""
+        conn = db.get_connection()
+        conn.close()
+
+        db.insert_asset(mock_asset)
+        assert db.get_asset_count() == 1
+
+    def test_wal_mode_is_enabled(self, db):
+        """Test the pooled connection runs in WAL journal mode"""
+        mode = db._shared_connection().execute("PRAGMA journal_mode").fetchone()[0]
+
+        assert mode.lower() == "wal"
+
+    def test_queries_do_not_open_new_connections(self, db, mock_assets):
+        """Test the hot path stops paying a connect() per query"""
+        db.insert_assets(mock_assets)
+        db._shared_connection()  # warm the pool
+
+        original_connect = sqlite3.connect
+        opened = []
+
+        def counting_connect(*args, **kwargs):
+            opened.append(args)
+            return original_connect(*args, **kwargs)
+
+        with patch("src.db.sqlite3.connect", side_effect=counting_connect):
+            db.search_assets(query="Madrid")
+            db.get_asset("TEST-001")
+            db.get_asset_count()
+            db.add_search_history("Madrid", None, 1)
+
+        assert opened == []
+
+    def test_close_releases_the_pooled_connection(self, db, mock_asset):
+        """Test close() drops the cached connection and it can be reopened"""
+        first = db._shared_connection()
+        db.close()
+
+        second = db._shared_connection()
+        assert second is not first
+
+        db.insert_asset(mock_asset)
+        assert db.get_asset_count() == 1
+
+    def test_close_is_idempotent(self, db):
+        """Test closing twice does not raise"""
+        db.close()
+        db.close()

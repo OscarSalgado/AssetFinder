@@ -1,9 +1,26 @@
 export class SearchModule {
     constructor(apiBaseUrl) {
         this.apiBaseUrl = apiBaseUrl;
+        this.inFlightSearch = null;
+    }
+
+    /**
+     * Cancels the search request currently in flight, if any. Paging quickly
+     * would otherwise leave several overlapping requests competing to render.
+     */
+    abortInFlightSearch() {
+        if (this.inFlightSearch) {
+            this.inFlightSearch.abort();
+            this.inFlightSearch = null;
+        }
     }
 
     async search(query = '', filters = {}, limit = 50, offset = 0, sortBy = 'date_subasta', sortOrder = 'DESC') {
+        this.abortInFlightSearch();
+
+        const controller = new AbortController();
+        this.inFlightSearch = controller;
+
         try {
             const queryParams = this.buildQueryParams(query, filters, limit, offset, sortBy, sortOrder);
             const url = `${this.apiBaseUrl}/search${queryParams}`;
@@ -14,6 +31,7 @@ export class SearchModule {
                     'Content-Type': 'application/json',
                     'Accept': 'application/json',
                 },
+                signal: controller.signal,
             });
 
             if (!response.ok) {
@@ -31,7 +49,16 @@ export class SearchModule {
                 timestamp: data.timestamp,
             };
         } catch (error) {
+            // Preserve the abort signal so callers can tell a superseded request
+            // apart from a genuine failure and skip the error message.
+            if (error.name === 'AbortError') {
+                throw error;
+            }
             throw new Error(`Failed to search assets: ${error.message}`);
+        } finally {
+            if (this.inFlightSearch === controller) {
+                this.inFlightSearch = null;
+            }
         }
     }
 
