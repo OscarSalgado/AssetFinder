@@ -1,10 +1,10 @@
 from typing import List, Dict, Optional, Any
-from datetime import datetime, timedelta
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .parser import AssetParser
+from .timeutils import utc_now, utc_now_isoformat
 
 
 # Mock data for fallback (Delta 0.2 compatibility)
@@ -125,17 +125,19 @@ class Scraper:
         else:
             results = self._fetch_real_assets(query, filters)
 
-        # Add metadata to results
+        # Add metadata to results. One timestamp for the whole batch instead of
+        # two clock reads per asset, and they now share a single value.
+        now = utc_now_isoformat()
         for asset in results:
             if "created_at" not in asset:
-                asset["created_at"] = datetime.utcnow().isoformat()
-            asset["updated_at"] = datetime.utcnow().isoformat()
+                asset["created_at"] = now
+            asset["updated_at"] = now
 
         # Save to database if requested
         if save_to_db and self.db:
             self._persist(results)
 
-        self.last_scraped = datetime.utcnow()
+        self.last_scraped = utc_now()
         return results
 
     def _fetch_mock_assets(

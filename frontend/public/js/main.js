@@ -13,6 +13,16 @@ export class App {
         this.lastTotal = null;
         // Monotonic counter so a slow response cannot overwrite a newer one.
         this.searchGeneration = 0;
+        // Form fields are looked up once instead of on every search.
+        this.fields = {
+            query: document.getElementById('query'),
+            type: document.getElementById('type'),
+            priceMin: document.getElementById('priceMin'),
+            priceMax: document.getElementById('priceMax'),
+            dateFrom: document.getElementById('dateFrom'),
+            dateTo: document.getElementById('dateTo'),
+            limit: document.getElementById('limit'),
+        };
     }
 
     get currentOffset() {
@@ -52,11 +62,11 @@ export class App {
     async handleSearch(event) {
         event.preventDefault();
 
-        const query = document.getElementById('query').value.trim();
+        const query = this.fields.query.value.trim();
         const filters = this.getFiltersFromForm();
 
         this.currentPage = 0;
-        this.currentLimit = parseInt(document.getElementById('limit').value) || 50;
+        this.currentLimit = parseInt(this.fields.limit.value) || 50;
         this.lastSearchQuery = query;
         this.lastSearchFilters = filters;
         this.lastTotal = null;
@@ -65,11 +75,11 @@ export class App {
     }
 
     getFiltersFromForm() {
-        const type = document.getElementById('type').value;
-        const priceMin = document.getElementById('priceMin').value;
-        const priceMax = document.getElementById('priceMax').value;
-        const dateFrom = document.getElementById('dateFrom').value;
-        const dateTo = document.getElementById('dateTo').value;
+        const type = this.fields.type.value;
+        const priceMin = this.fields.priceMin.value;
+        const priceMax = this.fields.priceMax.value;
+        const dateFrom = this.fields.dateFrom.value;
+        const dateTo = this.fields.dateTo.value;
 
         const filters = {};
 

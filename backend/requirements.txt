@@ -1,5 +1,9 @@
 requests==2.31.0
 beautifulsoup4==4.12.2
+# Optional but preferred HTML backend: measurably faster than html.parser.
+# parser.py falls back to html.parser when it is unavailable, so a deployment
+# without a prebuilt wheel still works.
+lxml==6.1.1
 flask==3.0.0
 pytest==7.4.2
 pytest-cov==4.1.0

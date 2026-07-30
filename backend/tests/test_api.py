@@ -699,7 +699,9 @@ class TestSecurityHardening:
 
     def test_error_messages_sanitized_export(self, client):
         """Test that export errors don't expose internal details"""
-        with patch('src.api.db.search_assets') as mock_search:
+        # The export streams from iter_search_assets; the first row is pulled
+        # before responding so a query failure still yields a 500.
+        with patch('src.api.db.iter_search_assets') as mock_search:
             mock_search.side_effect = Exception("CSV writer error")
             response = client.get("/api/export")
             assert response.status_code == 500
@@ -978,3 +980,348 @@ class TestStartupInitialisation:
         client.get("/api/health")
 
         assert api_module.db.get_asset_count() > 0
+
+
+class TestExportStreaming:
+    """Test the streamed CSV export"""
+
+    def _reference_csv(self, rows):
+        """CSV built the old way: fully materialised in memory."""
+        import csv as csv_module
+        import io as io_module
+        from src.api import EXPORT_FIELDNAMES
+
+        output = io_module.StringIO()
+        if rows:
+            writer = csv_module.DictWriter(
+                output, fieldnames=EXPORT_FIELDNAMES, restval=""
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+        return output.getvalue()
+
+    def test_export_returns_csv(self, client):
+        """Test export responds with a CSV attachment"""
+        response = client.get("/api/export")
+
+        assert response.status_code == 200
+        assert response.mimetype == "text/csv"
+        assert "assets_export.csv" in response.headers["Content-Disposition"]
+
+    def test_export_is_streamed(self, client):
+        """Test the response is a stream, not a buffered body"""
+        response = client.get("/api/export")
+
+        assert response.is_streamed
+
+    def test_export_matches_the_buffered_output_byte_for_byte(self, client):
+        """Test streaming did not change a single byte of the CSV"""
+        import src.api as api_module
+
+        client.get("/api/health")  # ensure the catalogue is seeded
+        rows, _ = api_module.db.search_assets(limit=api_module.MAX_EXPORT_ROWS)
+        expected = self._reference_csv(rows)
+
+        got = client.get("/api/export").get_data(as_text=True)
+
+        assert got == expected
+
+    def test_export_with_filters_matches_reference(self, client):
+        """Test a filtered export is also byte-identical"""
+        import src.api as api_module
+
+        client.get("/api/health")  # ensure the catalogue is seeded
+        rows, _ = api_module.db.search_assets(
+            filters={"type": "inmueble"},
+            limit=api_module.MAX_EXPORT_ROWS,
+            sort_by="id",
+            sort_order="ASC",
+        )
+        expected = self._reference_csv(rows)
+
+        got = client.get(
+            "/api/export?type=inmueble&sort_by=id&sort_order=ASC"
+        ).get_data(as_text=True)
+
+        assert got == expected
+
+    def test_export_header_is_present_with_rows(self, client):
+        """Test the header row is emitted when there is data"""
+        body = client.get("/api/export").get_data(as_text=True)
+
+        assert body.startswith("id,type,description")
+
+    def test_export_of_no_rows_is_empty(self, client):
+        """Test an empty result set yields an empty body, as before"""
+        response = client.get("/api/export?type=inmueble&price_max=1")
+
+        assert response.status_code == 200
+        assert response.get_data(as_text=True) == ""
+
+    def test_export_covers_every_row(self, client):
+        """Test no row is lost across chunk boundaries"""
+        import src.api as api_module
+
+        many = [
+            {
+                "id": f"CHUNK-{i:05d}",
+                "type": "inmueble",
+                "description": "Piso en Madrid centro con balcon " * 5,
+                "price_initial": 1000.0 + i,
+                "price_min": 900.0 + i,
+                "date_subasta": "2024-03-15",
+                "location": "Madrid, España",
+            }
+            for i in range(2000)
+        ]
+        api_module.db.insert_assets(many)
+
+        body = client.get("/api/export?q=Piso%20en%20Madrid").get_data(as_text=True)
+        data_lines = [line for line in body.splitlines() if line.strip()]
+
+        # One header plus every matching row.
+        assert len(data_lines) == len(many) + 1
+        assert "CHUNK-00000" in body
+        assert "CHUNK-01999" in body
+
+    def test_export_rejects_invalid_price_before_streaming(self, client):
+        """Test validation errors still produce a 400, not a partial CSV"""
+        response = client.get("/api/export?price_min=invalid")
+
+        assert response.status_code == 400
+        assert response.get_json()["code"] == "INVALID_PARAM"
+
+    def test_export_rejects_oversized_query(self, client):
+        """Test the query length limit is enforced before streaming"""
+        response = client.get(f"/api/export?q={'x' * 1001}")
+
+        assert response.status_code == 400
+
+    def test_export_is_not_compressed(self, client):
+        """Test the streaming guard keeps gzip away from the export"""
+        response = client.get(
+            "/api/export", headers={"Accept-Encoding": "gzip"}
+        )
+
+        assert response.status_code == 200
+        assert "Content-Encoding" not in response.headers
+        assert response.get_data(as_text=True).startswith("id,type,description")
+
+
+class TestCompressionAndCaching:
+    """Test gzip and conditional requests"""
+
+    def _big_catalogue(self):
+        return [
+            {
+                "id": f"GZIP-{i:05d}",
+                "type": "inmueble",
+                "description": "Piso amplio en Madrid centro con balcon y garaje " * 3,
+                "price_initial": 100000.0 + i,
+                "price_min": 90000.0 + i,
+                "date_subasta": "2024-03-15",
+                "location": "Madrid, España",
+            }
+            for i in range(200)
+        ]
+
+    def test_json_is_compressed_when_accepted(self, client):
+        """Test a sizeable JSON body is gzipped"""
+        import gzip as gzip_module
+        import json as json_module
+        import src.api as api_module
+
+        api_module.db.insert_assets(self._big_catalogue())
+
+        response = client.get(
+            "/api/search?limit=200", headers={"Accept-Encoding": "gzip"}
+        )
+
+        assert response.headers["Content-Encoding"] == "gzip"
+        # The test client does not decode Content-Encoding for us.
+        payload = json_module.loads(gzip_module.decompress(response.get_data()))
+        assert payload["total"] > 0
+
+    def test_compression_is_lossless(self, client):
+        """Test the decompressed body is exactly the uncompressed one"""
+        import gzip as gzip_module
+        import json as json_module
+        import src.api as api_module
+
+        api_module.db.insert_assets(self._big_catalogue())
+
+        plain = client.get("/api/search?limit=200").get_json()
+        packed = client.get(
+            "/api/search?limit=200", headers={"Accept-Encoding": "gzip"}
+        ).get_data()
+        unpacked = json_module.loads(gzip_module.decompress(packed))
+
+        # Every response embeds a fresh timestamp, so compare everything else.
+        plain.pop("timestamp")
+        unpacked.pop("timestamp")
+        assert unpacked == plain
+
+    def test_compression_shrinks_the_payload(self, client):
+        """Test gzip actually reduces the transferred bytes"""
+        import gzip as gzip_module
+        import src.api as api_module
+
+        api_module.db.insert_assets(self._big_catalogue())
+
+        raw = client.get("/api/search?limit=200").get_data()
+        packed = client.get(
+            "/api/search?limit=200", headers={"Accept-Encoding": "gzip"}
+        ).get_data()
+
+        assert len(packed) < len(raw)
+        # Worth doing at all only if the saving is substantial.
+        assert len(packed) < len(raw) * 0.5
+        assert len(gzip_module.decompress(packed)) == len(raw)
+
+    def test_no_compression_without_accept_encoding(self, client):
+        """Test a client that does not advertise gzip gets plain bytes"""
+        import src.api as api_module
+
+        api_module.db.insert_assets(self._big_catalogue())
+
+        response = client.get("/api/search?limit=200", headers={"Accept-Encoding": ""})
+
+        assert "Content-Encoding" not in response.headers
+
+    def test_small_responses_are_not_compressed(self, client):
+        """Test tiny bodies skip gzip, where the header costs more than it saves"""
+        response = client.get("/api/health", headers={"Accept-Encoding": "gzip"})
+
+        assert len(response.get_data()) < 1024
+        assert "Content-Encoding" not in response.headers
+
+    def test_vary_header_is_set(self, client):
+        """Test caches are told the body varies by encoding"""
+        response = client.get("/api/health")
+
+        assert response.headers["Vary"] == "Accept-Encoding"
+
+    def test_responses_embed_a_fresh_timestamp(self, client):
+        """
+        Test why no ETag is served.
+
+        Two identical requests return different bytes because every payload
+        carries a freshly generated timestamp. A validator computed over the
+        body could therefore never match, so attaching one would cost a hash
+        per response for a cache hit that cannot happen. This test pins that
+        reasoning: if responses ever become byte-stable, revisit the decision.
+        """
+        first = client.get("/api/assets/SSSS-2024-001")
+        second = client.get("/api/assets/SSSS-2024-001")
+
+        assert first.get_json()["timestamp"] != second.get_json()["timestamp"]
+        assert "ETag" not in first.headers
+
+    def test_error_responses_are_not_compressed(self, client):
+        """Test non-200 responses are returned untouched"""
+        response = client.get(
+            "/api/assets/DOES-NOT-EXIST", headers={"Accept-Encoding": "gzip"}
+        )
+
+        assert response.status_code == 404
+        assert "Content-Encoding" not in response.headers
+
+
+class TestCompressionEdgeCases:
+    """Test the compression guard rails directly"""
+
+    def test_already_encoded_body_is_left_alone(self, client):
+        """Test a response that declares an encoding is not double-compressed"""
+        import src.api as api_module
+        from flask import Response
+
+        with api_module.app.test_request_context(
+            "/api/search", headers={"Accept-Encoding": "gzip"}
+        ):
+            response = Response(b"x" * 4096, mimetype="application/json")
+            response.headers["Content-Encoding"] = "br"
+
+            result = api_module._compress_response(response)
+
+            assert result.headers["Content-Encoding"] == "br"
+            assert result.get_data() == b"x" * 4096
+
+    def test_non_compressible_mimetype_is_left_alone(self, client):
+        """Test binary payloads skip gzip"""
+        import src.api as api_module
+        from flask import Response
+
+        with api_module.app.test_request_context(
+            "/api/search", headers={"Accept-Encoding": "gzip"}
+        ):
+            payload = b"\x89PNG\r\n" + b"\x00" * 4096
+            response = Response(payload, mimetype="image/png")
+
+            result = api_module._compress_response(response)
+
+            assert "Content-Encoding" not in result.headers
+            assert result.get_data() == payload
+
+    def test_streamed_response_is_left_alone(self, client):
+        """Test the is_streamed guard protects the generator"""
+        import src.api as api_module
+        from flask import Response
+
+        consumed = []
+
+        def generate():
+            for chunk in ("a" * 2048, "b" * 2048):
+                consumed.append(chunk[0])
+                yield chunk
+
+        with api_module.app.test_request_context(
+            "/api/export", headers={"Accept-Encoding": "gzip"}
+        ):
+            response = Response(generate(), mimetype="text/csv")
+
+            result = api_module._compress_response(response)
+
+            # Nothing was pulled from the generator.
+            assert consumed == []
+            assert "Content-Encoding" not in result.headers
+
+
+class TestExportFailureModes:
+    """Test what happens when the export fails at each stage"""
+
+    def test_value_error_before_streaming_returns_400(self, client):
+        """Test a ValueError while preparing the export is a clean 400"""
+        with patch("src.api.db.iter_search_assets") as mock_iter:
+            mock_iter.side_effect = ValueError("bad sort field")
+
+            response = client.get("/api/export")
+
+            assert response.status_code == 400
+            assert response.get_json()["code"] == "INVALID_PARAM"
+
+    def test_failure_after_the_first_row_is_logged(self, client):
+        """
+        Test a mid-stream failure is logged instead of silently truncating.
+
+        The 200 is already committed by then, so the download ends up short;
+        the log entry is the only signal that it happened.
+        """
+        import src.api as api_module
+
+        client.get("/api/health")  # seed the catalogue
+
+        rows, _ = api_module.db.search_assets(limit=10)
+
+        def exploding():
+            yield rows[0]
+            raise RuntimeError("connection lost")
+
+        with patch("src.api.db.iter_search_assets", return_value=exploding()):
+            with patch("src.api.logger") as mock_logger:
+                with pytest.raises(RuntimeError):
+                    client.get("/api/export").get_data()
+
+                logged = " ".join(
+                    str(call) for call in mock_logger.error.call_args_list
+                )
+                assert "Export truncated" in logged

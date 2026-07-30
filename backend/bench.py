@@ -19,6 +19,7 @@ import statistics
 import sys
 import tempfile
 import time
+import tracemalloc
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -171,6 +172,124 @@ def bench_search(assets, tmpdir):
     }
 
 
+def bench_history(assets, tmpdir, rows=20000):
+    """Coste de leer el historial, que crece con cada busqueda."""
+    ruta = Path(tmpdir) / "bench_history.db"
+    db = Database(str(ruta))
+
+    for i in range(rows):
+        db.add_search_history(f"consulta {i}", {"type": "inmueble"}, i)
+
+    ms = timed(lambda: db.get_search_history(limit=50, offset=0), reps=7)
+    stored = db.get_search_history(limit=1)[1]
+
+    return {"get_search_history (50 de N)": (ms, stored)}
+
+
+def build_page(items: int) -> str:
+    """Pagina HTML sintetica con la forma del portal de subastas."""
+    bloques = "".join(
+        f"""<div class="asset-item" data-id="SSSS-2024-{i:04d}">
+            <h3>Piso de {i % 5 + 1} habitaciones en Madrid centro</h3>
+            <span class="price">150.000,00 &euro;</span>
+            <span>Puja minima 120.000,00 &euro;</span>
+            <span class="date">15/03/2024</span>
+            <p>Localizacion: Madrid</p>
+            <div><span>texto de relleno para engordar el subarbol</span>
+            {'<em>x</em>' * 20}</div>
+        </div>"""
+        for i in range(items)
+    )
+    return f'<html><body><div class="assets-list">{bloques}</div></body></html>'
+
+
+def bench_parser(items=200):
+    """
+    Coste del parser y numero de recorridos del subarbol por elemento.
+
+    get_text() recorre el subarbol completo, asi que llamarlo una vez por campo
+    multiplica el coste por el numero de campos extraidos.
+    """
+    from src.parser import AssetParser
+    import bs4
+
+    parser = AssetParser()
+    html = build_page(items)
+
+    llamadas = {"n": 0}
+    original = bs4.element.Tag.get_text
+
+    def contando(self, *args, **kwargs):
+        llamadas["n"] += 1
+        return original(self, *args, **kwargs)
+
+    bs4.element.Tag.get_text = contando
+    try:
+        parser.parse_response(html)
+    finally:
+        bs4.element.Tag.get_text = original
+
+    ms = timed(lambda: parser.parse_response(html), reps=3)
+    por_item = round(llamadas["n"] / items, 1) if items else 0
+
+    return {
+        f"parse_response ({items} items)": (ms, items),
+        "  get_text() por item": (por_item, llamadas["n"]),
+    }
+
+
+def bench_export(assets, tmpdir):
+    """
+    Export CSV: tiempo hasta el primer byte y memoria de pico.
+
+    Una implementacion que materializa todas las filas antes de responder tiene
+    un TTFB proporcional al total y una memoria de pico que crece con el; una en
+    streaming responde en cuanto tiene el primer lote.
+    """
+    from werkzeug.test import EnvironBuilder
+    from src import api as api_module
+
+    ruta = Path(tmpdir) / "bench_export.db"
+    app = api_module.create_app(str(ruta))
+    app.config["TESTING"] = True
+    api_module.db.insert_assets(assets)
+
+    def consumir(medir_pico=False):
+        env = EnvironBuilder(path="/api/export", method="GET").get_environ()
+
+        def start_response(status, headers, exc_info=None):
+            return lambda data: None
+
+        if medir_pico:
+            tracemalloc.start()
+
+        inicio = time.perf_counter()
+        app_iter = app(env, start_response)
+        iterador = iter(app_iter)
+        primero = next(iterador, b"")
+        ttfb = (time.perf_counter() - inicio) * 1000
+
+        total = len(primero) + sum(len(trozo) for trozo in iterador)
+        if hasattr(app_iter, "close"):
+            app_iter.close()
+
+        pico = 0
+        if medir_pico:
+            pico = tracemalloc.get_traced_memory()[1] // 1024
+            tracemalloc.stop()
+
+        return ttfb, total, pico
+
+    consumir()  # calentamiento
+    ttfb, total_bytes, _ = consumir()
+    _, _, pico_kb = consumir(medir_pico=True)
+
+    return {
+        "GET /api/export (primer byte)": (ttfb, total_bytes // 1024),
+        "  memoria de pico (KB)": (pico_kb, len(assets)),
+    }
+
+
 def bench_dedup(assets):
     """Coste del motor de deduplicacion (el punto O(n^2) del proyecto)."""
     engine = DeduplicationEngine(confidence_threshold=0.8)
@@ -218,14 +337,31 @@ def main():
             for nombre, (ms, extra) in bench_search(assets, tmpdir).items():
                 print(f"{nombre:<38} {ms:>14.2f} {extra:>14}")
 
+            for nombre, (ms, extra) in bench_export(assets, tmpdir).items():
+                print(f"{nombre:<38} {ms:>14.2f} {extra:>14}")
+
         if args.skip_dedup_large and len(assets) > 2000:
             print(f"{'(clustering omitido por tamano)':<38}")
         else:
             for nombre, (ms, extra) in bench_dedup(assets).items():
                 print(f"{nombre:<38} {ms:>14.2f} {extra:>14}")
 
+    # El historial y el parser no dependen del tamano del catalogo de activos.
+    print("\n### Historial de busquedas y parser\n")
+    print(f"{'operacion':<38} {'mediana (ms)':>14} {'conexiones/N':>14}")
+    print("-" * 68)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for nombre, (ms, extra) in bench_history(None, tmpdir).items():
+            print(f"{nombre:<38} {ms:>14.2f} {extra:>14}")
+
+    for nombre, (ms, extra) in bench_parser().items():
+        print(f"{nombre:<38} {ms:>14.2f} {extra:>14}")
+
     print("\nNota: 'conexiones/N' es el numero de conexiones SQLite abiertas en las")
     print("filas de escritura/peticion, y el tamano del catalogo en las de dedup.")
+    print("En las filas indentadas la primera columna no es un tiempo sino la")
+    print("magnitud que indica el nombre.")
 
 
 if __name__ == "__main__":

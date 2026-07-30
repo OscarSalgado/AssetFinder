@@ -1,9 +1,10 @@
 import pytest
 import tempfile
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from src.db import Database
+from src.db import Database, ASSET_COLUMNS, HISTORY_COLUMNS
 
 
 class TestDatabase:
@@ -843,3 +844,272 @@ class TestConnectionReuse:
         """Test closing twice does not raise"""
         db.close()
         db.close()
+
+
+class TestSearchHistoryRetention:
+    """Test the rolling window that bounds search_history"""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        """Create test database"""
+        return Database(str(tmp_path / "test.db"))
+
+    def test_prune_keeps_the_newest_entries(self, db):
+        """Test pruning retains the most recent rows"""
+        for i in range(50):
+            db.add_search_history(f"consulta {i}", None, i)
+
+        db.prune_search_history(keep=10)
+
+        history, total = db.get_search_history(limit=100)
+        assert total == 10
+        queries = {item["query"] for item in history}
+        assert "consulta 49" in queries
+        assert "consulta 0" not in queries
+
+    def test_prune_on_empty_table_is_a_noop(self, db):
+        """Test pruning nothing does not fail"""
+        assert db.prune_search_history(keep=10) == 0
+
+    def test_prune_below_the_limit_removes_nothing(self, db):
+        """Test a table under the limit is left alone"""
+        for i in range(5):
+            db.add_search_history(f"consulta {i}", None, i)
+
+        assert db.prune_search_history(keep=100) == 0
+        assert db.get_search_history()[1] == 5
+
+    def test_prune_reports_rows_removed(self, db):
+        """Test the number of deleted rows is returned"""
+        for i in range(30):
+            db.add_search_history(f"consulta {i}", None, i)
+
+        assert db.prune_search_history(keep=10) == 20
+
+    def test_prune_is_stable_across_repeated_calls(self, db):
+        """Test pruning twice does not keep shrinking the window"""
+        for i in range(30):
+            db.add_search_history(f"consulta {i}", None, i)
+
+        db.prune_search_history(keep=10)
+        assert db.prune_search_history(keep=10) == 0
+        assert db.get_search_history()[1] == 10
+
+    def test_history_is_pruned_automatically(self, tmp_path):
+        """Test the table stabilises without an explicit prune call"""
+        db = Database(str(tmp_path / "auto.db"))
+        db.SEARCH_HISTORY_LIMIT = 20
+        db.HISTORY_PRUNE_INTERVAL = 10
+
+        for i in range(60):
+            db.add_search_history(f"consulta {i}", None, i)
+
+        # Bounded by the limit plus at most one un-pruned interval.
+        total = db.get_search_history(limit=1)[1]
+        assert total <= db.SEARCH_HISTORY_LIMIT + db.HISTORY_PRUNE_INTERVAL
+        assert total < 60
+
+    def test_add_search_history_still_returns_the_row_id(self, db):
+        """Test pruning does not disturb the returned id"""
+        first = db.add_search_history("uno", None, 1)
+        second = db.add_search_history("dos", None, 2)
+
+        assert isinstance(first, int)
+        assert second > first
+
+    def test_prune_sqlite_error(self, tmp_path):
+        """Test that sqlite3.Error in prune raises RuntimeError"""
+        db = Database(str(tmp_path / "test.db"))
+
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+            mock_shared_conn.return_value = mock_conn
+            mock_conn.cursor.return_value = mock_cursor
+            mock_cursor.execute.side_effect = sqlite3.Error("Prune error")
+
+            with pytest.raises(RuntimeError, match="Failed to prune search history"):
+                db.prune_search_history()
+
+
+class TestSchemaIndexes:
+    """Test the indexes that keep queries off full scans"""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        """Create test database"""
+        return Database(str(tmp_path / "test.db"))
+
+    def _index_names(self, db):
+        rows = db._shared_connection().execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    def test_expected_indexes_exist(self, db):
+        """Test every index the queries rely on is created"""
+        names = self._index_names(db)
+
+        for expected in (
+            "idx_assets_type",
+            "idx_assets_price",
+            "idx_assets_date",
+            "idx_assets_type_date",
+            "idx_history_created",
+        ):
+            assert expected in names
+
+    def test_history_ordering_uses_the_index(self, db):
+        """Test the history query no longer sorts the whole table"""
+        for i in range(20):
+            db.add_search_history(f"consulta {i}", None, i)
+
+        plan = db._shared_connection().execute(
+            "EXPLAIN QUERY PLAN SELECT id, query, filters, result_count, created_at "
+            "FROM search_history ORDER BY created_at DESC LIMIT 50 OFFSET 0"
+        ).fetchall()
+        detail = " ".join(str(row[-1]) for row in plan)
+
+        assert "idx_history_created" in detail
+        assert "TEMP B-TREE" not in detail.upper()
+
+    def test_type_filter_with_date_order_uses_the_composite_index(self, db, mock_assets):
+        """Test filter-plus-order is served by one index"""
+        db.insert_assets(mock_assets)
+
+        plan = db._shared_connection().execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM assets WHERE type = ? "
+            "ORDER BY date_subasta DESC LIMIT 50",
+            ("inmueble",),
+        ).fetchall()
+        detail = " ".join(str(row[-1]) for row in plan)
+
+        assert "idx_assets_type_date" in detail
+
+
+class TestExplicitColumns:
+    """Test queries select named columns instead of *"""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        """Create test database"""
+        return Database(str(tmp_path / "test.db"))
+
+    def test_get_asset_returns_every_column(self, db, mock_asset):
+        """Test the asset shape is unchanged by the explicit column list"""
+        db.insert_asset(mock_asset)
+
+        asset = db.get_asset("TEST-001")
+
+        assert set(asset) == set(ASSET_COLUMNS)
+
+    def test_search_returns_every_column(self, db, mock_assets):
+        """Test searching returns the same shape as before"""
+        db.insert_assets(mock_assets)
+
+        rows, _ = db.search_assets()
+
+        assert rows
+        for row in rows:
+            assert set(row) == set(ASSET_COLUMNS)
+
+    def test_history_returns_every_column(self, db):
+        """Test history rows keep their shape"""
+        db.add_search_history("madrid", {"type": "inmueble"}, 3)
+
+        history, _ = db.get_search_history()
+
+        assert set(history[0]) == set(HISTORY_COLUMNS)
+        assert history[0]["filters"] == {"type": "inmueble"}
+
+
+class TestTimestampFormat:
+    """Test the deprecated utcnow replacement keeps the stored format"""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        """Create test database"""
+        return Database(str(tmp_path / "test.db"))
+
+    def test_timestamps_are_naive_utc(self, db, mock_asset):
+        """Test stored timestamps carry no timezone suffix"""
+        db.insert_asset(mock_asset)
+
+        created = db.get_asset("TEST-001")["created_at"]
+
+        assert "+" not in created
+        assert not created.endswith("Z")
+        datetime.fromisoformat(created)  # parses as a naive timestamp
+
+    def test_history_timestamps_are_naive_utc(self, db):
+        """Test history timestamps use the same format"""
+        db.add_search_history("madrid", None, 1)
+
+        created = db.get_search_history()[0][0]["created_at"]
+
+        assert "+" not in created
+        datetime.fromisoformat(created)
+
+    def test_timestamps_are_close_to_utc_now(self, db, mock_asset):
+        """Test the value is actually UTC, not local time"""
+        db.insert_asset(mock_asset)
+
+        created = datetime.fromisoformat(db.get_asset("TEST-001")["created_at"])
+        delta = abs((datetime.now(timezone.utc).replace(tzinfo=None) - created).total_seconds())
+
+        assert delta < 60
+
+
+class TestIterSearchAssets:
+    """Test the lazy row iterator used by the streaming export"""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        """Create test database"""
+        return Database(str(tmp_path / "test.db"))
+
+    def test_yields_the_same_rows_as_search_assets(self, db, mock_assets):
+        """Test the iterator matches the list-returning search"""
+        db.insert_assets(mock_assets)
+
+        listed, _ = db.search_assets(sort_by="id", sort_order="ASC")
+        streamed = list(db.iter_search_assets(sort_by="id", sort_order="ASC"))
+
+        assert streamed == listed
+
+    def test_applies_the_same_filters(self, db, mock_assets):
+        """Test filters behave identically on both paths"""
+        db.insert_assets(mock_assets)
+
+        listed, _ = db.search_assets(query="Madrid", filters={"type": "inmueble"})
+        streamed = list(
+            db.iter_search_assets(query="Madrid", filters={"type": "inmueble"})
+        )
+
+        assert streamed == listed
+
+    def test_honours_the_limit(self, db, mock_assets):
+        """Test the row cap is enforced"""
+        db.insert_assets(mock_assets)
+
+        assert len(list(db.iter_search_assets(limit=2))) == 2
+
+    def test_invalid_sort_falls_back_to_the_default(self, db, mock_assets):
+        """Test an unknown sort field cannot be injected"""
+        db.insert_assets(mock_assets)
+
+        rows = list(db.iter_search_assets(sort_by="; DROP TABLE assets", limit=10))
+
+        assert len(rows) == len(mock_assets)
+
+    def test_sqlite_error(self, tmp_path):
+        """Test that sqlite3.Error while iterating raises RuntimeError"""
+        db = Database(str(tmp_path / "test.db"))
+
+        with patch.object(db, "_shared_connection") as mock_shared_conn:
+            mock_conn = MagicMock()
+            mock_conn.cursor.side_effect = sqlite3.Error("Iter error")
+            mock_shared_conn.return_value = mock_conn
+
+            with pytest.raises(RuntimeError, match="Failed to search assets"):
+                list(db.iter_search_assets())

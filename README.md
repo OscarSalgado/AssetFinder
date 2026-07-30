@@ -24,14 +24,16 @@ Acceso rápido:
 - Setup base, Backend (DB + Parser + Persistencia), Frontend (UI + Integration + Features), Security Hardening
 
 **Métricas Finales**:
-- 617 tests (409 backend + 208 frontend)
-- 98.09% backend coverage, 100% statement / 93.45% branch frontend
+- 682 tests (465 backend + 217 frontend)
+- 98.87% backend coverage, 100% statement / 93.45% branch frontend
 - Rate limiting, validación de entrada y cabeceras de seguridad activas
 
-**Rendimiento** (ver `make bench`):
-- `GET /api/search`: 0 conexiones SQLite nuevas por petición
+**Rendimiento** (ver `make bench` y `EFFICIENCY_TODO.md`):
+- `GET /api/search`: 0 conexiones SQLite nuevas por petición, gzip 3,4×
 - Sincronización de catálogo: una transacción en lugar de una por fila
 - Deduplicación: poda exacta por cotas superiores sobre el `O(n²)`
+- Historial de búsquedas: 33× más rápido y con retención acotada
+- Export CSV en streaming: 5,4× al primer byte, mitad de memoria de pico
 
 ## Características
 

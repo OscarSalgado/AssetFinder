@@ -1,9 +1,7 @@
-from flask import Flask, request, jsonify, Response
-from datetime import datetime
+from flask import Flask, request, jsonify, Response, stream_with_context
 from typing import Tuple
-from functools import wraps
-import os
 import csv
+import gzip
 import io
 import logging
 
@@ -11,6 +9,7 @@ from .db import Database
 from .scraper import create_scraper
 from .deduplication import DeduplicationEngine
 from .security import SecurityHeaders, rate_limiter
+from .timeutils import utc_now_isoformat
 
 # Configure logging
 logging.basicConfig(
@@ -27,6 +26,27 @@ app.config["JSON_SORT_KEYS"] = False
 MAX_QUERY_LENGTH = 1000
 MAX_EXPORT_ROWS = 50000
 MAX_ASSET_ID_LENGTH = 100
+
+# Response compression
+COMPRESSION_MIN_BYTES = 1024
+COMPRESSIBLE_MIMETYPES = frozenset(
+    {"application/json", "application/javascript", "image/svg+xml"}
+)
+
+# CSV export is streamed: the buffer is flushed once it reaches this size, so
+# peak memory does not grow with the number of exported rows.
+EXPORT_CHUNK_BYTES = 64 * 1024
+EXPORT_FIELDNAMES = [
+    "id",
+    "type",
+    "description",
+    "price_initial",
+    "price_min",
+    "date_subasta",
+    "location",
+    "created_at",
+    "updated_at",
+]
 
 # Deduplication configuration
 MAX_DUPLICATE_CANDIDATES = 5000
@@ -90,6 +110,49 @@ def add_security_headers(response):
     remaining = rate_limiter.get_remaining(request.remote_addr or "unknown")
     response.headers["X-RateLimit-Limit"] = str(rate_limiter.max_requests)
     response.headers["X-RateLimit-Remaining"] = str(remaining)
+
+    return _compress_response(response)
+
+
+def _compress_response(response):
+    """
+    Compress the response body when the client accepts gzip.
+
+    Streamed responses are left untouched: reading their body would consume the
+    generator and defeat the streaming export entirely. The check is
+    `is_streamed`, not `direct_passthrough` — a Response built from a generator
+    has direct_passthrough set to False, so that guard would never fire.
+
+    No ETag is attached: every payload embeds a freshly generated `timestamp`,
+    so the validator would differ on every request and a 304 could never
+    happen. Hashing each body for an unreachable cache hit is pure overhead.
+    """
+    if response.is_streamed or response.direct_passthrough:
+        return response
+
+    response.headers["Vary"] = "Accept-Encoding"
+
+    if response.status_code != 200:
+        return response
+
+    if "gzip" not in request.headers.get("Accept-Encoding", ""):
+        return response
+
+    if response.headers.get("Content-Encoding"):
+        return response
+
+    mimetype = (response.mimetype or "").lower()
+    if not (mimetype.startswith("text/") or mimetype in COMPRESSIBLE_MIMETYPES):
+        return response
+
+    body = response.get_data()
+    # Below roughly one packet the gzip header costs more than it saves.
+    if len(body) < COMPRESSION_MIN_BYTES:
+        return response
+
+    response.set_data(gzip.compress(body, compresslevel=6))
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = str(len(response.get_data()))
     return response
 
 
@@ -100,7 +163,7 @@ def health_check() -> Tuple[dict, int]:
         return (
             {
                 "status": "ok",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now_isoformat(),
                 "scraper": {"healthy": scraper.is_healthy()},
                 "database": {"connected": True},
             },
@@ -205,7 +268,7 @@ def search_assets() -> Tuple[dict, int]:
                 "offset": offset,
                 "sort_by": sort_by,
                 "sort_order": sort_order,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now_isoformat(),
             },
             200,
         )
@@ -247,7 +310,7 @@ def get_asset(asset_id: str) -> Tuple[dict, int]:
         return (
             {
                 "asset": asset,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now_isoformat(),
             },
             200,
         )
@@ -274,7 +337,7 @@ def sync_assets() -> Tuple[dict, int]:
             {
                 "message": f"Synced {count} assets",
                 "count": count,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now_isoformat(),
             },
             200,
         )
@@ -305,7 +368,7 @@ def get_search_history() -> Tuple[dict, int]:
                 "total": total,
                 "limit": limit,
                 "offset": offset,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": utc_now_isoformat(),
             },
             200,
         )
@@ -388,42 +451,71 @@ def export_assets() -> Tuple[Response, int]:
         if date_to := request.args.get("date_to"):
             filters["date_to"] = date_to
 
-        assets, total = db.search_assets(
-            query=query or None,
-            filters=filters or None,
-            limit=MAX_EXPORT_ROWS,
-            offset=0,
-            sort_by=sort_by,
-            sort_order=sort_order,
+        # Every parameter is validated above: once the first byte is on the wire
+        # the status code is fixed, so nothing that can fail may happen later.
+        rows = iter(
+            db.iter_search_assets(
+                query=query or None,
+                filters=filters or None,
+                limit=MAX_EXPORT_ROWS,
+                sort_by=sort_by,
+                sort_order=sort_order,
+            )
         )
 
-        # Validate export size
-        if len(assets) > MAX_EXPORT_ROWS:
-            logger.warning(f"Export request exceeds max rows: {len(assets)}")
-            return (
-                jsonify({"error": f"Export limited to {MAX_EXPORT_ROWS} rows", "code": "EXPORT_TOO_LARGE"}),
-                413,
-            )
+        # Pull the first row eagerly. iter_search_assets is a generator, so the
+        # query does not even run until the first next(): without this, a failing
+        # query would surface mid-stream, once the 200 is already committed, and
+        # the client would receive a truncated CSV that looks successful.
+        try:
+            first_row = next(rows)
+        except StopIteration:
+            first_row = None
 
-        output = io.StringIO()
-        if assets:
-            fieldnames = [
-                "id",
-                "type",
-                "description",
-                "price_initial",
-                "price_min",
-                "date_subasta",
-                "location",
-                "created_at",
-                "updated_at",
-            ]
-            writer = csv.DictWriter(output, fieldnames=fieldnames, restval="")
-            writer.writeheader()
-            writer.writerows(assets)
+        def generate():
+            """
+            Serialise the CSV in chunks.
 
-        logger.info(f"Export completed: {len(assets)} rows, query='{query[:50]}'")
-        response = Response(output.getvalue(), mimetype="text/csv")
+            Rows arrive lazily from SQLite and the buffer is drained every
+            EXPORT_CHUNK_BYTES, so peak memory is bounded by the chunk size
+            rather than by the size of the result set.
+            """
+            buffer = io.StringIO()
+            writer = csv.DictWriter(buffer, fieldnames=EXPORT_FIELDNAMES, restval="")
+            exported = 0
+
+            try:
+                # The header is only emitted when there is at least one row,
+                # matching the previous behaviour of returning an empty body.
+                if first_row is not None:
+                    writer.writeheader()
+                    writer.writerow(first_row)
+                    exported = 1
+
+                for row in rows:
+                    writer.writerow(row)
+                    exported += 1
+
+                    if buffer.tell() >= EXPORT_CHUNK_BYTES:
+                        yield buffer.getvalue()
+                        buffer.seek(0)
+                        buffer.truncate(0)
+
+                if buffer.tell():
+                    yield buffer.getvalue()
+            except Exception as e:
+                # The status code is already sent, so the download ends up
+                # truncated. Log it loudly rather than failing silently.
+                logger.error(
+                    f"Export truncated after {exported} rows: {type(e).__name__}"
+                )
+                raise
+
+            logger.info(f"Export completed: {exported} rows, query='{query[:50]}'")
+
+        response = Response(
+            stream_with_context(generate()), mimetype="text/csv"
+        )
         response.headers["Content-Disposition"] = "attachment; filename=assets_export.csv"
         return response, 200
 
@@ -500,7 +592,7 @@ def find_duplicates() -> Tuple[dict, int]:
                         }
                         for dup in duplicates
                     ],
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "timestamp": utc_now_isoformat() + "Z",
                 }
             ),
             200,

@@ -1,9 +1,10 @@
 import sqlite3
 import json
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Iterable
+
+from .timeutils import utc_now_isoformat
 
 # Columns of the assets table in the order used by INSERT statements.
 ASSET_COLUMNS = (
@@ -20,9 +21,24 @@ ASSET_COLUMNS = (
 
 REQUIRED_ASSET_FIELDS = ("id", "type", "description", "price_initial", "date_subasta")
 
+HISTORY_COLUMNS = ("id", "query", "filters", "result_count", "created_at")
+
+# Explicit column lists: SELECT * returns whatever the schema happens to hold and
+# forces SQLite to read every column even when only some are used.
+ASSET_SELECT = ", ".join(ASSET_COLUMNS)
+HISTORY_SELECT = ", ".join(HISTORY_COLUMNS)
+
 
 class Database:
     """SQLite database interface for AssetFinder"""
+
+    # Every search appends a history row and nothing ever removed them, so the
+    # table grew without bound. Keep a rolling window instead.
+    SEARCH_HISTORY_LIMIT = 10000
+
+    # Inserts between two prunes: pruning on every insert would pay a DELETE per
+    # search for nothing.
+    HISTORY_PRUNE_INTERVAL = 500
 
     def __init__(self, db_path: str = "data/assetfinder.db"):
         self.db_path = Path(db_path)
@@ -31,6 +47,7 @@ class Database:
         # be shared across threads, and opening one per query was costing a
         # connect() on every single database call.
         self._local = threading.local()
+        self._history_inserts_since_prune = 0
         self.create_tables()
 
     def get_connection(self) -> sqlite3.Connection:
@@ -123,6 +140,22 @@ class Database:
                 ON assets(date_subasta)
                 """
             )
+            # Filter by type plus order by date is the most common search shape;
+            # a composite index serves both without a sort step.
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_assets_type_date
+                ON assets(type, date_subasta)
+                """
+            )
+            # Without this, reading the history scans and sorts the whole table,
+            # which grows with every single search.
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_history_created
+                ON search_history(created_at DESC)
+                """
+            )
 
             conn.commit()
             return True
@@ -153,7 +186,7 @@ class Database:
         conn = self._shared_connection()
         try:
             cursor = conn.cursor()
-            now = datetime.utcnow().isoformat()
+            now = utc_now_isoformat()
             row = self._asset_row(asset, now)
 
             cursor.execute(
@@ -183,7 +216,7 @@ class Database:
         conn = self._shared_connection()
         try:
             cursor = conn.cursor()
-            now = datetime.utcnow().isoformat()
+            now = utc_now_isoformat()
             rows = [self._asset_row(asset, now) for asset in assets]
 
             if not rows:
@@ -208,7 +241,7 @@ class Database:
         conn = self._shared_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM assets WHERE id = ?", (asset_id,))
+            cursor.execute(f"SELECT {ASSET_SELECT} FROM assets WHERE id = ?", (asset_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
         except sqlite3.Error as e:
@@ -227,49 +260,9 @@ class Database:
         conn = self._shared_connection()
         try:
             cursor = conn.cursor()
-            filters = filters or {}
 
-            valid_sort_fields = ["price_initial", "date_subasta", "id", "type"]
-            if sort_by not in valid_sort_fields:
-                sort_by = "date_subasta"
-
-            valid_sort_orders = ["ASC", "DESC"]
-            if sort_order.upper() not in valid_sort_orders:
-                sort_order = "DESC"
-
-            # Base query
-            where_clauses = []
-            params = []
-
-            # Text search in description
-            if query:
-                where_clauses.append("description LIKE ?")
-                params.append(f"%{query}%")
-
-            # Type filter
-            if "type" in filters and filters["type"]:
-                where_clauses.append("type = ?")
-                params.append(filters["type"])
-
-            # Price range filter
-            if "price_min" in filters and filters["price_min"] is not None:
-                where_clauses.append("price_initial >= ?")
-                params.append(filters["price_min"])
-
-            if "price_max" in filters and filters["price_max"] is not None:
-                where_clauses.append("price_initial <= ?")
-                params.append(filters["price_max"])
-
-            # Date range filter
-            if "date_from" in filters and filters["date_from"]:
-                where_clauses.append("date_subasta >= ?")
-                params.append(filters["date_from"])
-
-            if "date_to" in filters and filters["date_to"]:
-                where_clauses.append("date_subasta <= ?")
-                params.append(filters["date_to"])
-
-            where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+            sort_by, sort_order = self._validate_sort(sort_by, sort_order)
+            where_sql, params = self._build_search_where(query, filters)
 
             # Count total results
             count_query = f"SELECT COUNT(*) FROM assets WHERE {where_sql}"
@@ -278,7 +271,7 @@ class Database:
 
             # Fetch paginated results with sorting
             data_query = f"""
-                SELECT * FROM assets
+                SELECT {ASSET_SELECT} FROM assets
                 WHERE {where_sql}
                 ORDER BY {sort_by} {sort_order}
                 LIMIT ? OFFSET ?
@@ -290,6 +283,99 @@ class Database:
         except sqlite3.Error as e:
             raise RuntimeError(f"Failed to search assets: {e}")
 
+    @staticmethod
+    def _validate_sort(sort_by: str, sort_order: str) -> tuple[str, str]:
+        """Clamp sort parameters to the allow-list before interpolating them."""
+        valid_sort_fields = ["price_initial", "date_subasta", "id", "type"]
+        if sort_by not in valid_sort_fields:
+            sort_by = "date_subasta"
+
+        valid_sort_orders = ["ASC", "DESC"]
+        if sort_order.upper() not in valid_sort_orders:
+            sort_order = "DESC"
+
+        return sort_by, sort_order
+
+    @staticmethod
+    def _build_search_where(
+        query: Optional[str], filters: Optional[Dict[str, Any]]
+    ) -> tuple[str, list]:
+        """
+        Build the WHERE clause and parameters shared by search and export.
+
+        Kept in one place so the streaming export cannot drift from the
+        paginated search and silently apply different filters.
+        """
+        filters = filters or {}
+        where_clauses = []
+        params: list = []
+
+        # Text search in description
+        if query:
+            where_clauses.append("description LIKE ?")
+            params.append(f"%{query}%")
+
+        # Type filter
+        if "type" in filters and filters["type"]:
+            where_clauses.append("type = ?")
+            params.append(filters["type"])
+
+        # Price range filter
+        if "price_min" in filters and filters["price_min"] is not None:
+            where_clauses.append("price_initial >= ?")
+            params.append(filters["price_min"])
+
+        if "price_max" in filters and filters["price_max"] is not None:
+            where_clauses.append("price_initial <= ?")
+            params.append(filters["price_max"])
+
+        # Date range filter
+        if "date_from" in filters and filters["date_from"]:
+            where_clauses.append("date_subasta >= ?")
+            params.append(filters["date_from"])
+
+        if "date_to" in filters and filters["date_to"]:
+            where_clauses.append("date_subasta <= ?")
+            params.append(filters["date_to"])
+
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        return where_sql, params
+
+    def iter_search_assets(
+        self,
+        query: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 100,
+        sort_by: str = "date_subasta",
+        sort_order: str = "DESC",
+    ) -> Iterable[Dict[str, Any]]:
+        """
+        Yield matching assets one at a time instead of building a list.
+
+        Used by the CSV export: materialising up to MAX_EXPORT_ROWS rows made
+        peak memory grow with the size of the result set.
+        """
+        conn = self._shared_connection()
+        try:
+            sort_by, sort_order = self._validate_sort(sort_by, sort_order)
+            where_sql, params = self._build_search_where(query, filters)
+
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT {ASSET_SELECT} FROM assets
+                WHERE {where_sql}
+                ORDER BY {sort_by} {sort_order}
+                LIMIT ?
+                """,
+                params + [limit],
+            )
+
+            for row in cursor:
+                yield dict(row)
+        except sqlite3.Error as e:
+            raise RuntimeError(f"Failed to search assets: {e}")
+
     def add_search_history(
         self, query: str, filters: Optional[Dict[str, Any]], result_count: int
     ) -> int:
@@ -297,7 +383,7 @@ class Database:
         conn = self._shared_connection()
         try:
             cursor = conn.cursor()
-            now = datetime.utcnow().isoformat()
+            now = utc_now_isoformat()
             filters_json = json.dumps(filters) if filters else None
 
             cursor.execute(
@@ -309,9 +395,53 @@ class Database:
             )
 
             conn.commit()
-            return cursor.lastrowid
+            row_id = cursor.lastrowid
         except sqlite3.Error as e:
             raise RuntimeError(f"Failed to add search history: {e}")
+
+        # Amortised: one prune every HISTORY_PRUNE_INTERVAL inserts.
+        self._history_inserts_since_prune += 1
+        if self._history_inserts_since_prune >= self.HISTORY_PRUNE_INTERVAL:
+            self.prune_search_history()
+
+        return row_id
+
+    def prune_search_history(self, keep: Optional[int] = None) -> int:
+        """
+        Drop the oldest history rows, keeping a rolling window.
+
+        Deletes by primary key range rather than by timestamp: id is
+        INTEGER PRIMARY KEY AUTOINCREMENT, so it is monotonic and never reused,
+        and the delete walks the primary key index at O(rows removed).
+
+        Args:
+            keep: Rows to retain (defaults to SEARCH_HISTORY_LIMIT)
+
+        Returns:
+            Number of rows removed
+        """
+        keep = self.SEARCH_HISTORY_LIMIT if keep is None else keep
+        conn = self._shared_connection()
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(id) FROM search_history")
+            max_id = cursor.fetchone()[0]
+
+            self._history_inserts_since_prune = 0
+
+            if max_id is None:
+                return 0
+
+            cutoff = max_id - keep
+            if cutoff <= 0:
+                return 0
+
+            cursor.execute("DELETE FROM search_history WHERE id <= ?", (cutoff,))
+            conn.commit()
+            return cursor.rowcount
+        except sqlite3.Error as e:
+            raise RuntimeError(f"Failed to prune search history: {e}")
 
     def get_search_history(
         self, limit: int = 50, offset: int = 0
@@ -327,8 +457,8 @@ class Database:
 
             # Fetch
             cursor.execute(
-                """
-                SELECT * FROM search_history
+                f"""
+                SELECT {HISTORY_SELECT} FROM search_history
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
                 """,

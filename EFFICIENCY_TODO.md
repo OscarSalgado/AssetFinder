@@ -1,169 +1,200 @@
 # AssetFinder — Code Review y TODO de Eficiencia
 
-Resultado de una revisión completa del código fuente (backend, frontend, CI y
-configuración). Las tareas P0 y P1 están implementadas; P2 y P3 quedan
-pendientes y priorizadas.
+Resultado de una revisión completa del código (backend, frontend, CI y
+configuración), ejecutada en dos fases. **Toda cifra de este documento está
+medida con `make bench`, no estimada.**
 
-Toda cifra de este documento está medida con `make bench`, no estimada.
+La regla que ha guiado el trabajo: medir antes de implementar y descartar lo que
+no se paga a sí mismo. Cuatro tareas propuestas en la revisión inicial fueron
+refutadas por la medición, y dos de ellas eran errores de análisis míos.
 
 ---
 
 ## Resultados medidos
 
-Mediana sobre un catálogo de 1.100 activos, misma máquina, antes y después:
+### Fase P0/P1
+
+Mediana sobre 1.100 activos, antes y después:
 
 | Operación | Antes | Después | Factor |
 |-----------|------:|--------:|-------:|
 | `GET /api/search` | 5,47 ms | 1,12 ms | 4,9× |
 | `GET /api/search` (conexiones SQLite) | 3 | **0** | — |
-| `GET /api/health` | 0,43 ms | 0,30 ms | 1,4× |
 | Sincronizar catálogo, fila a fila | 3.892 ms | 120 ms | 32× |
 | Sincronizar catálogo, por lote | 3.892 ms | 5,7 ms | 683× |
 | `find_duplicates` (1 vs 1.100) | 176 ms | 17,5 ms | 10× |
-| `cluster_duplicates` (1.100 × 1.100) | 78,2 s | 5,2 s | 15× |
+| `cluster_duplicates` (1.100²) | 78,2 s | 5,2 s | 15× |
 | Render de 50 tarjetas | 10,1 ms | 0,24 ms | 42× |
 | Nodos DOM por render | 300 | **0** | — |
 | Formateadores `Intl` por render | 150 | **0** (2 al cargar) | — |
 
-Cobertura: backend 92,68% → **98,09%** (409 tests), frontend 100% statements y
-92,76% → **93,45%** branches (208 tests). Total **617 tests**.
+### Fase P2/P3
+
+| Operación | Antes | Después | Factor |
+|-----------|------:|--------:|-------:|
+| `get_search_history` (50 de 20.000) | 4,96 ms | 0,15 ms | 33× |
+| Ídem, aislado con 50.000 filas | 2,70 ms | 0,053 ms | 51× |
+| `GET /api/export` (primer byte) | 17,8 ms | 3,3 ms | 5,4× |
+| `GET /api/export` (memoria de pico) | 1.596 KB | 734 KB | −54% |
+| `GET /api/search` con gzip (bytes) | 1.953 | 574 | 3,4× |
+| `parse_response` (200 elementos) | 282 ms | 233 ms | 1,21× |
+| `get_text()` por elemento | 6,0 | 2,0 | — |
+| `SELECT type + ORDER BY date` | 0,634 ms | 0,048 ms | 13× |
+
+Desglose del parser, para no atribuir la mejora a lo que no fue: **el selector
+combinado** aportó 120,6 → 55,6 ms (2,2×) y **lxml** 98,8 → 71,2 ms (1,39×).
+Reducir `get_text()` de 6 a 2 llamadas por elemento **no movió el tiempo de
+forma apreciable**: no era el cuello de botella.
+
+Cobertura: backend 92,68% → **98,87%** (465 tests), frontend 100% statements y
+92,76% → 93,45% branches (217 tests). Total **682 tests**.
 
 ---
 
-## P0 — Bloqueantes ✅ completado
+## Descartadas por medición
+
+Estas tareas estaban en el plan aprobado. La medición las refutó y **no se
+implementaron**. Documentadas aquí con su cifra para que no vuelvan a proponerse
+sin datos nuevos.
+
+| Tarea | Por qué no |
+|-------|-----------|
+| **FTS5 con tokenizador trigram** | La semántica se preserva (recuentos idénticos a `LIKE`, y `'adrid'` encuentra «Madrid»), pero con 20.000 filas la ganancia va de 2,6× a **0,7× — más lento** en `'unifamiliar'`. FTS5 gana con consultas selectivas; estas casan el 17-25% de las filas. A cambio exige tabla virtual, 3 triggers, migración, fallback por debajo de 3 caracteres (trigram devuelve 0 filas en silencio) y **escapado obligatorio**: sin entrecomillar, buscar `50%`, `AND` o `'` lanza `OperationalError`, es decir un 500 en producción. |
+| **`COUNT(*) OVER ()` en `search_assets`** | **Medido 10× más lento**: 1,355 → 13,527 ms con 20.000 filas. La función de ventana materializa todas las filas que casan antes de aplicar `LIMIT 50`; las dos consultas actuales paran temprano usando el índice. Mi razonamiento original («el predicado se evalúa dos veces») era cierto pero irrelevante. |
+| **Banda de precio en `/api/duplicates`** | La cota es exacta pero **demasiado ancha para podar**: con umbral 0,8 y peso 0,25, `d_max = 0,8` da `[0,2·p, 5·p]`, que cubre casi toda la distribución. Descarta el **6%** de candidatos (5.000 → 4.700) sin mejora medible (84,6 → 82,3 ms). |
+| **`ETag` y respuestas 304** | **Imposible por diseño actual**: cada respuesta incrusta un `timestamp` fresco (verificado: 185575 vs 186820 µs en dos peticiones idénticas), así que el validador difiere siempre y el 304 es inalcanzable. Hashear cada cuerpo para un acierto imposible es coste puro. Hay un test (`test_responses_embed_a_fresh_timestamp`) que fija el razonamiento: si las respuestas llegan a ser estables byte a byte, reconsiderar. |
+| **Filtrar clusters de tamaño 1** | Cambio del contrato público de `cluster_duplicates` sin consumidores (la API solo usa `find_duplicates`) y sin mejora medible: asignar N listas de un elemento es irrelevante frente a las comparaciones O(n²). El cambio a `deque`, que sí es una mejora algorítmica, se hizo. |
+
+---
+
+## P0 — Bloqueantes ✅
 
 | # | Hallazgo | Estado |
 |---|----------|--------|
-| B1 | `api.py` pasaba a la deduplicación la tupla `(filas, total)` que devuelve `search_assets`, así que **`/api/duplicates` devolvía 500 en el 100% de las llamadas**. No existía ningún test del endpoint. | ✅ Corregido + 11 tests |
-| B2 | `main.js` pasaba el número de página en la posición del argumento `offset`: la página 2 pedía `offset=1`, **repitiendo 49 de cada 50 resultados**, y «Página 1 de N» nunca cambiaba. | ✅ Corregido + 9 tests |
-| B3 | `MOCK_ASSETS.copy()` es copia superficial y `fetch_assets` escribía `updated_at` en los dicts, **mutando la constante de módulo** y filtrando estado entre peticiones y tests. | ✅ Corregido + 3 tests |
-| B4 | `pytest.ini` exigía `--cov-fail-under=100` con 92,68% real: **el job de backend del CI fallaba siempre**. Además dos `--cov-report=term-missing` redundantes. | ✅ Gates alineados con lo medido |
-| B5 | `security.py` (rate limiter, validación) **nunca se importaba en `api.py`**: 290 líneas inertes con 43 tests validando código que no se ejecutaba. `require_api_key` usaba `request` sin importarlo (`NameError` latente). | ✅ Rate limiting activo, decorador muerto eliminado |
+| B1 | `api.py` pasaba a la deduplicación la tupla `(filas, total)`: **`/api/duplicates` devolvía 500 en el 100% de las llamadas**, y no tenía ningún test. | ✅ + 11 tests |
+| B2 | `main.js` pasaba el número de página donde va el `offset`: **repetía 49 de cada 50 resultados**. | ✅ + 9 tests |
+| B3 | `MOCK_ASSETS.copy()` superficial: `fetch_assets` **mutaba la constante de módulo**. | ✅ + 3 tests |
+| B4 | `pytest.ini` exigía 100% con 92,68% real: **el CI fallaba siempre**. | ✅ gates alineados con lo medido |
+| B5 | `security.py` **no se importaba en la API**: 290 líneas inertes, sin rate limiting, y `require_api_key` con un `NameError` latente. | ✅ rate limiting activo, decorador muerto eliminado |
 
-### Hallazgo adicional de seguridad
+### Hallazgo de seguridad colateral
 
 El `escapeHtml` original (`textContent` → `innerHTML`) **no escapaba comillas**,
-porque `innerHTML` no las necesita en nodos de texto. Pero su salida se
-interpola dentro de atributos (`data-asset-id`, `class`), de modo que un id con
-`x" onmouseover="alert(1)` **inyectaba un atributo real** — verificado con jsdom.
-La reescritura de T12, hecha por rendimiento, cierra el agujero. Hay tests de
-regresión que fallan si vuelve a abrirse.
+pero su salida se interpola dentro de atributos (`data-asset-id`, `class`). Un id
+con `x" onmouseover="alert(1)` **inyectaba un atributo real** — verificado con
+jsdom. La reescritura hecha por rendimiento cerró el agujero, con tests de
+regresión.
 
 ---
 
-## P1 — Eficiencia de alto impacto ✅ completado
+## P1 — Eficiencia de alto impacto ✅
 
-- **T7** Conexión SQLite reutilizada por hilo (`threading.local`) con `journal_mode=WAL`,
-  `synchronous=NORMAL` y `cache_size=-8000`. `get_connection()` sigue siendo pública
-  y devuelve una conexión propia del llamante; los métodos internos usan la
-  cacheada. → 3 conexiones por búsqueda a 0.
-- **T8** Seeding inicial protegido por flag de módulo en lugar de un `COUNT(*)`
-  en cada petición, incluida `/api/health`.
-- **T9** `insert_assets()` con `executemany` en una sola transacción, con
-  degradación a inserción fila a fila si el lote falla, para no perder el
-  comportamiento de «saltar el registro malo y continuar».
-- **T10** **Poda exacta del O(n²) de deduplicación.** Los tres scores baratos
-  (precio 25%, ubicación 15%, tipo 10%) son O(1) y suman la mitad del peso; como
-  el score de título está acotado por 1,0, un par cuyo margen restante no alcanza
-  el umbral se descarta **sin ejecutar `SequenceMatcher`**. Después, cascada de
-  cotas superiores documentadas de `difflib`: `real_quick_ratio()` →
-  `quick_ratio()` → `ratio()`. Normalización de cadenas precalculada una vez por
-  activo en lugar de una vez por par.
-  La poda **no es heurística**: 17 tests comparan la salida contra una
-  transcripción literal del algoritmo original en 7 umbrales, incluyendo
-  descripciones vacías, precios `None`/cero, tipo y ubicación ausentes y cadenas
-  largas que activan el `autojunk` de `difflib`. Se conserva la orientación
-  `(a, b)` de las secuencias precisamente porque `autojunk` solo se aplica a `b`.
-- **T11** BFS con `collections.deque`: extraer la cabeza de una `list` es O(n).
-- **T12/T13** `escapeHtml` con tabla estática de entidades y formateadores `Intl`
-  a nivel de módulo.
-- **T14** Rate limiter con `deque` y purga periódica: expiración O(1) amortizada
-  y memoria acotada, en lugar de reconstruir la lista completa en cada
-  comprobación y no liberar nunca los identificadores vistos.
-- **T15** `AbortController` más contador de generación: paginar rápido ya no deja
-  peticiones solapadas compitiendo por renderizar.
-- **T16** `make bench` (backend y frontend) como línea base reproducible.
-
-### Desviación respecto al plan
-
-El plan incluía que `cluster_duplicates` dejara de devolver clusters de tamaño 1.
-**No se ha aplicado**: es un cambio del contrato público que rompe dos tests
-existentes, no tiene ningún consumidor en el código (la API solo usa
-`find_duplicates`) y no aporta mejora medible — asignar N listas de un elemento
-es irrelevante al lado de las comparaciones O(n²). El cambio de `deque`, que sí
-es una mejora algorítmica real, se ha hecho. Queda como decisión abierta si
-interesa el filtrado por limpieza de la API.
+- **Conexión SQLite reutilizada** por hilo con WAL, `synchronous=NORMAL` y
+  `cache_size`. `get_connection()` sigue devolviendo conexiones propias del
+  llamante; los métodos internos usan la cacheada.
+- **`insert_assets()`** con `executemany` en una transacción, con degradación a
+  fila a fila si el lote falla.
+- **Seeding por flag** en lugar de un `COUNT(*)` por petición.
+- **Poda exacta del O(n²) de deduplicación**: los tres scores baratos se evalúan
+  primero y el par se descarta sin ejecutar `SequenceMatcher` cuando la cota
+  superior no alcanza el umbral, con cascada
+  `real_quick_ratio` → `quick_ratio` → `ratio`. **No es heurística**: 17 tests la
+  comparan contra una transcripción del algoritmo original en 7 umbrales, con
+  descripciones vacías, precios `None`/cero y cadenas largas que activan el
+  `autojunk` de `difflib`. Se conserva la orientación `(a, b)` porque `autojunk`
+  solo se aplica a `b`.
+- **BFS con `deque`** (extraer la cabeza de una `list` es O(n)).
+- **`escapeHtml` sin DOM** e **`Intl` cacheado** en `ui.js`.
+- **Rate limiter con `deque`** y purga periódica: O(1) amortizado y memoria
+  acotada.
+- **`AbortController`** más contador de generación en el frontend.
+- **`make bench`** como línea base reproducible.
 
 ---
 
-## P2 — Eficiencia estructural (pendiente)
+## P2 — Eficiencia estructural ✅
 
-- [ ] **T17 · Búsqueda de texto indexada (FTS5).** `description LIKE '%q%'` no
-      puede usar índice: hace full scan en cada búsqueda. Usar tabla virtual
-      `assets_fts` con **`tokenize='trigram'`** y triggers de sincronización.
-      El tokenizador trigram es el único que **preserva la semántica de
-      subcadena** de `LIKE`: con un tokenizador estándar, buscar `adrid` dejaría
-      de encontrar «Madrid». Consultas de menos de 3 caracteres mantienen la ruta
-      `LIKE` como fallback. Requiere migración idempotente de la BD existente.
-- [ ] **T18 · Una sola consulta en `search_assets`.** Hoy se evalúa el mismo
-      predicado dos veces (`COUNT(*)` y `SELECT`); sustituir por
-      `COUNT(*) OVER ()` como columna.
-- [ ] **T19 · Índices faltantes.** `search_history(created_at DESC)` — el
-      `ORDER BY created_at DESC` hace scan más sort completo — y compuesto
-      `assets(type, date_subasta)`. Sustituir `SELECT *` por columnas explícitas.
-- [ ] **T20 · Export CSV en streaming.** Hoy materializa hasta 50.000 filas en
-      una lista, las vuelca a un `StringIO` y construye el `Response` con el
-      string completo: dos copias íntegras en memoria antes del primer byte.
-      Usar generador con `stream_with_context`.
-- [ ] **T21 · Prefiltro SQL exacto en `/api/duplicates`.** Acotar candidatos por
-      banda de precio derivada del umbral, no fija. Como
-      `cota(d) = 1 − W_PRICE·d`, la diferencia relativa máxima compatible con el
-      umbral es `d_max = (1 − umbral) / W_PRICE`; con umbral 0,8 y peso 0,25 →
-      `d_max = 0,8`, es decir `price_initial BETWEEN 0,2·p AND 5·p`, aprovechando
-      el índice `idx_assets_price` ya existente. Es poda **exacta**. Si
-      `d_max ≥ 1` la banda se omite, y el caso `price = 0` se trata aparte.
-- [ ] **T22 · Parser de un solo recorrido.** `_extract_id`, `_extract_type`,
-      `_extract_description`, `_extract_price` (×2), `_extract_date` y
-      `_extract_location` llaman **cada uno** a `element.get_text()`: 7
-      recorridos del subárbol por activo. Además el fallback evalúa
-      `_looks_like_asset_item()` sobre **cada div anidado**, con coste cuadrático
-      en la profundidad del documento, y `_find_asset_items` acumula candidatos
-      sin deduplicar. Patrones a `re.compile` de módulo. Añadir `lxml` como
-      parser de BeautifulSoup (3–5× más rápido) con fallback a `html.parser`.
-- [ ] **T23 · gzip y cabeceras de caché.** Los JSON de búsqueda son muy
-      comprimibles y hoy las respuestas idénticas se retransmiten completas
-      (sin `ETag` ni `Cache-Control`).
-- [ ] **T24 · Timestamps.** `datetime.utcnow()` está deprecado en Python 3.12+ y
-      se invoca dos veces por activo dentro del bucle; usar
-      `datetime.now(timezone.utc)` una vez fuera.
+- **Índices**: `idx_history_created` sobre `search_history(created_at DESC)` y
+  compuesto `idx_assets_type_date`. El compuesto **cuesta 1,37× en escritura por
+  lote y gana 13× en la lectura** filtro+orden: el trueque correcto para una
+  aplicación de búsqueda, donde se lee en cada petición y se escribe al
+  sincronizar.
+- **Retención del historial**: `SEARCH_HISTORY_LIMIT` con borrado por rango de
+  clave primaria (`id` es `AUTOINCREMENT`, monótono y sin reutilización, así que
+  el `DELETE` usa el índice de la PK), invocado de forma amortizada cada
+  `HISTORY_PRUNE_INTERVAL` inserciones. Ataca la causa: la tabla crecía sin
+  límite.
+- **Columnas explícitas** en lugar de `SELECT *`, reutilizando `ASSET_COLUMNS`.
+- **Export CSV en streaming** con `iter_search_assets()` y
+  `stream_with_context`. La primera fila se pide **antes** de responder: al ser
+  un generador, la consulta no se ejecuta hasta el primer `next()`, y sin eso un
+  fallo de consulta aparecería con el 200 ya enviado, entregando un CSV truncado
+  con apariencia de éxito. Un fallo posterior al primer byte se registra en el
+  log en lugar de truncar en silencio.
+- **gzip** en `after_request`, con umbral de 1 KB y `Vary: Accept-Encoding`.
+- **Parser**: los 9 `soup.select()` combinados en uno, patrones a `re.compile`
+  de módulo, `get_text()` leído una vez por elemento, y `lxml` con **fallback a
+  `html.parser`** (obligatorio: sin él, un despliegue sin wheel binario
+  fallaría). Comparando contra la implementación anterior cargada desde git, la
+  **única** diferencia de salida fue la pretendida: el parser antiguo
+  **duplicaba activos** cuando un elemento casaba con dos selectores.
+- **Timestamps**: `datetime.utcnow()` (deprecado en 3.12+) sustituido por un
+  helper en `src/timeutils.py` que **preserva el formato naive** que la BD y la
+  API ya usan; en `fetch_assets` se calcula una vez fuera del bucle en lugar de
+  dos veces por activo.
 
-## P3 — Producción y tooling (pendiente)
+## P3 — Limpieza ✅
 
-- [ ] **T25** `gunicorn` más `Procfile`/`render.yaml`; hoy `api.py` usa
-      `app.run(debug=True)`, el servidor de desarrollo de Flask.
-- [ ] **T26** Separar `requirements.txt` (runtime) de `requirements-dev.txt`; hoy
-      la imagen de producción instala `pytest` y `pytest-cov`.
-- [ ] **T27** `ruff` y `eslint` reales: el job `lint-check` del CI solo comprueba
-      con `ls` que existan ficheros.
-- [ ] **T28** Limpiar imports muertos (`os`, `wraps` en `api.py`) y usar de verdad
-      `getAssetTypeBadge()` en `ui.js`, que se calcula y se descarta — la UI
-      muestra «vehiculo» en lugar de «Vehículo».
-- [ ] **T29** Cachear las referencias del formulario en el constructor de `App`
-      en lugar de 5 `getElementById` por búsqueda.
-- [ ] **T30** Cerrar los huecos de cobertura restantes (endpoint de export,
-      scraping real, una rama del parser) y subir los gates al valor nuevo.
+- `ui.js` calculaba `getAssetTypeBadge()` y **descartaba el resultado**: la UI
+  mostraba «vehiculo» en lugar de «Vehículo». Corregido conservando
+  `class="asset-type vehiculo"` para el CSS.
+- Referencias del formulario cacheadas en el constructor de `App`.
+- Imports muertos eliminados (`os`, `wraps`, `datetime` donde quedó sin uso).
+
+---
+
+## Pendiente
+
+- [ ] **`gunicorn` y despliegue.** `api.py` usa `app.run(debug=True)`, el
+      servidor de desarrollo de Flask. Falta `Procfile`/`render.yaml`.
+- [ ] **Separar `requirements.txt`** de `requirements-dev.txt`: la imagen de
+      producción instala `pytest` y `pytest-cov`.
+- [ ] **Linters reales** (`ruff`, `eslint`): el job `lint-check` del CI solo
+      comprueba con `ls` que existan ficheros.
+- [ ] **Inconsistencia del timestamp en la API.** `api.py` (endpoint de
+      duplicados) añade `"Z"` al `timestamp` y los otros cinco endpoints no.
+      Corregirlo altera la respuesta, así que queda como decisión de API.
+      Relacionado: el formato naive hace que `new Date()` en el frontend lo
+      interprete como hora **local**, no UTC.
+- [ ] **Fallback cuadrático del parser.** `_looks_like_asset_item` se evalúa
+      sobre cada div anidado cuando ningún selector casa, con coste cuadrático en
+      la profundidad. No se tocó porque acotarlo cambiaría qué elementos se
+      seleccionan, y por tanto la salida.
+- [ ] **Varianza del benchmark.** `insert_asset (fila a fila)` oscila entre 90 y
+      270 ms entre ejecuciones en esta máquina. Para juzgar cambios en la ruta de
+      escritura, medir aislado y repetido, no con una sola muestra del bench.
+- [ ] **Huecos de cobertura restantes**: scraping real (`scraper.py` 218-220,
+      302-303) y dos ramas del parser.
 
 ---
 
 ## Cómo verificar
 
 ```bash
-make bench                  # línea base de rendimiento (backend + frontend)
-cd backend && pytest        # 409 tests, gate de cobertura al 98%
-cd frontend && npm test     # 208 tests
+make bench                  # rendimiento (backend + frontend)
+cd backend && pytest        # 465 tests, gate de cobertura al 98%
+cd frontend && npm test     # 217 tests
 ```
 
-El test que sostiene toda la optimización de deduplicación es
-`TestOptimisationEquivalence` en `backend/tests/test_deduplication.py`: compara
-la implementación optimizada contra el algoritmo original par a par y score a
-score. Si la poda dejara de ser exacta, falla.
+Tests que sostienen las optimizaciones más delicadas:
+
+- `TestOptimisationEquivalence` (`test_deduplication.py`): compara la poda
+  contra el algoritmo original par a par y score a score. Si deja de ser exacta,
+  falla.
+- `TestExportStreaming::test_export_matches_the_buffered_output_byte_for_byte`:
+  el CSV en streaming es idéntico al que producía la versión que lo
+  materializaba en memoria.
+- `TestCompressionEdgeCases::test_streamed_response_is_left_alone`: la guarda
+  `is_streamed` no toca el generador. La primera versión de esa guarda usaba
+  `direct_passthrough`, que en una `Response` de generador vale `False`, así que
+  **no protegía nada**.

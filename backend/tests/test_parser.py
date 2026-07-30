@@ -70,7 +70,8 @@ class TestAssetParser:
     def test_parser_initialization(self, parser):
         """Test parser initialization"""
         assert parser is not None
-        assert parser.parser == "html.parser"
+        # lxml is used when installed, html.parser otherwise.
+        assert parser.parser in ("lxml", "html.parser")
 
     def test_parse_response_simple(self, parser, sample_html_simple):
         """Test parsing simple HTML"""
@@ -668,3 +669,181 @@ class TestAssetParserErrorHandling:
         assert normalized["id"] == "TEST"
         assert normalized["price_initial"] == 0.0
         assert normalized["location"] is None
+
+
+class TestParserBackendSelection:
+    """Test the HTML backend choice and its fallback"""
+
+    def test_default_parser_is_available(self):
+        """Test the chosen backend is one BeautifulSoup can build"""
+        from src.parser import DEFAULT_PARSER
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup("<div>x</div>", DEFAULT_PARSER)
+        assert soup.find("div").get_text() == "x"
+
+    def test_lxml_is_preferred_when_importable(self):
+        """Test lxml wins when it is installed"""
+        from src.parser import _default_parser
+
+        assert _default_parser() == "lxml"
+
+    def test_falls_back_to_html_parser_without_lxml(self):
+        """Test a missing lxml does not break the import"""
+        import builtins
+        from src.parser import _default_parser
+
+        real_import = builtins.__import__
+
+        def no_lxml(name, *args, **kwargs):
+            if name == "lxml":
+                raise ImportError("No module named 'lxml'")
+            return real_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", side_effect=no_lxml):
+            assert _default_parser() == "html.parser"
+
+    def test_both_backends_produce_the_same_assets(self):
+        """Test switching backend does not change what is extracted"""
+        from src.parser import AssetParser
+
+        html = """
+        <div class="asset-item" data-id="SSSS-2024-001">
+            <h3>Piso de 3 habitaciones en Madrid centro</h3>
+            <span>150.000,00 &euro;</span>
+            <span>15/03/2024</span>
+            <p>Localización: Madrid</p>
+        </div>
+        """
+
+        with_lxml = AssetParser()
+        with_lxml.parser = "lxml"
+        with_html = AssetParser()
+        with_html.parser = "html.parser"
+
+        assert with_lxml.parse_response(html) == with_html.parse_response(html)
+
+
+class TestItemSelection:
+    """Test how candidate elements are collected"""
+
+    def test_element_matching_two_selectors_is_returned_once(self):
+        """Test the single-pass select removes duplicate candidates"""
+        from src.parser import AssetParser
+
+        # This div satisfies both div.asset-item and div.bien; the previous
+        # per-selector loop collected it twice and emitted a duplicate asset.
+        html = """
+        <div class="asset-item bien" data-id="SSSS-2024-009">
+            <h3>Piso en Valencia con jardin</h3>
+            <span>200.000,00 &euro;</span>
+            <span>10/04/2024</span>
+        </div>
+        """
+        parser = AssetParser()
+
+        assets = parser.parse_response(html)
+
+        assert len(assets) == 1
+        assert assets[0]["id"] == "SSSS-2024-009"
+
+    def test_candidates_are_returned_in_document_order(self):
+        """Test items keep the order they appear on the page"""
+        from src.parser import AssetParser
+        from bs4 import BeautifulSoup
+
+        html = """
+        <div class="lote" data-id="PRIMERO"><h3>Coche Toyota diesel</h3></div>
+        <div class="asset-item" data-id="SEGUNDO"><h3>Piso en Madrid centro</h3></div>
+        <div class="bien" data-id="TERCERO"><h3>Casa en Bilbao garaje</h3></div>
+        """
+        parser = AssetParser()
+        soup = BeautifulSoup(html, parser.parser)
+
+        items = parser._find_asset_items(soup)
+
+        assert [item.get("data-id") for item in items] == [
+            "PRIMERO",
+            "SEGUNDO",
+            "TERCERO",
+        ]
+
+    def test_get_text_is_read_once_per_item(self):
+        """Test extraction no longer re-walks the subtree for every field"""
+        from src.parser import AssetParser
+        import bs4
+
+        html = """
+        <div class="asset-item" data-id="SSSS-2024-001">
+            <h3>Piso de 3 habitaciones en Madrid centro</h3>
+            <span>150.000,00 &euro;</span>
+            <span>Puja minima 120.000,00 &euro;</span>
+            <span>15/03/2024</span>
+            <p>Localización: Madrid</p>
+        </div>
+        """
+        parser = AssetParser()
+        soup = bs4.BeautifulSoup(html, parser.parser)
+        item = parser._find_asset_items(soup)[0]
+
+        calls = []
+        original = bs4.element.Tag.get_text
+
+        def counting(self, *args, **kwargs):
+            calls.append(self.name)
+            return original(self, *args, **kwargs)
+
+        with patch.object(bs4.element.Tag, "get_text", counting):
+            parser._extract_asset_data(item, soup)
+
+        # One walk of the item, plus the small h3 the description selector hits.
+        assert calls.count("div") == 1
+        assert len(calls) == 2
+
+
+class TestElementWrappers:
+    """Test the element-based wrappers kept around the text extractors"""
+
+    @pytest.fixture
+    def parser(self):
+        return AssetParser()
+
+    def _element(self, parser, html):
+        from bs4 import BeautifulSoup
+
+        return BeautifulSoup(html, parser.parser).find(["div", "tr"])
+
+    def test_extract_type_from_element(self, parser):
+        """Test the type wrapper reads the element text"""
+        elem = self._element(parser, "<div>Piso en Madrid centro</div>")
+
+        assert parser._extract_type(elem) == "inmueble"
+
+    def test_extract_id_from_id_attribute(self, parser):
+        """Test the id attribute is used when data-id is absent"""
+        elem = self._element(parser, '<div id="ASSET-456">Piso</div>')
+
+        assert parser._extract_id(elem) == "ASSET-456"
+
+    def test_data_id_takes_precedence_over_id(self, parser):
+        """Test data-id wins when both attributes are present"""
+        elem = self._element(parser, '<div data-id="DATA-1" id="ID-1">Piso</div>')
+
+        assert parser._extract_id(elem) == "DATA-1"
+
+    def test_wrappers_agree_with_the_text_extractors(self, parser):
+        """Test the element and text paths return the same values"""
+        html = (
+            '<div data-id="SSSS-2024-001">'
+            "<h3>Piso de 3 habitaciones en Madrid</h3>"
+            "<span>150.000,00 &euro;</span><span>15/03/2024</span>"
+            "<p>Localización: Madrid</p></div>"
+        )
+        elem = self._element(parser, html)
+        text = elem.get_text()
+
+        assert parser._extract_type(elem) == parser._type_from(text)
+        assert parser._extract_price(elem) == parser._price_from(text, "inicial")
+        assert parser._extract_date(elem) == parser._date_from(text)
+        assert parser._extract_location(elem) == parser._location_from(text)
+        assert parser._extract_description(elem) == parser._description_from(text, elem)

@@ -638,3 +638,70 @@ describe('UIModule escapeHtml attribute safety', () => {
         expect(uiModule.escapeHtml('Piso en Madrid centro')).toBe('Piso en Madrid centro');
     });
 });
+
+describe('UIModule asset type label', () => {
+    let uiModule;
+
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div class="results-section">
+                <div id="resultsContainer"></div>
+                <div id="resultsCount"></div>
+                <div id="loadingIndicator"></div>
+                <div id="paginationControls"></div>
+            </div>
+            <div id="historyContainer"></div>
+        `;
+        uiModule = new UIModule();
+    });
+
+    function renderOne(type) {
+        uiModule.renderResults([
+            {
+                id: 'LABEL-1',
+                type,
+                description: 'Descripcion de prueba',
+                price_initial: 1000,
+                price_min: 900,
+                date_subasta: '2024-03-15',
+                location: 'Madrid',
+            },
+        ]);
+        return document.querySelector('.asset-type');
+    }
+
+    test('shows the human-readable label, not the raw type', () => {
+        // getAssetTypeBadge was computed and then discarded, so the card used to
+        // display the raw value ("vehiculo") instead of the label.
+        const badge = renderOne('vehiculo');
+
+        expect(badge.textContent.trim()).toBe('Vehículo');
+    });
+
+    test('keeps the raw type as a CSS class for styling', () => {
+        const badge = renderOne('vehiculo');
+
+        expect(badge.classList.contains('asset-type')).toBe(true);
+        expect(badge.classList.contains('vehiculo')).toBe(true);
+    });
+
+    test('labels every known type', () => {
+        expect(renderOne('inmueble').textContent.trim()).toBe('Inmueble');
+        expect(renderOne('vehiculo').textContent.trim()).toBe('Vehículo');
+        expect(renderOne('mueble').textContent.trim()).toBe('Mueble');
+        expect(renderOne('otros').textContent.trim()).toBe('Otros');
+    });
+
+    test('falls back to the raw value for an unknown type', () => {
+        const badge = renderOne('desconocido');
+
+        expect(badge.textContent.trim()).toBe('desconocido');
+    });
+
+    test('escapes the label of a malicious type', () => {
+        const badge = renderOne('<script>alert(1)</script>');
+
+        expect(document.querySelector('#resultsContainer script')).toBeNull();
+        expect(badge.textContent).toContain('<script>');
+    });
+});

@@ -54,7 +54,7 @@ export class UIModule {
                 <div class="asset-card-header">
                     <div>
                         <div class="asset-id">${this.escapeHtml(asset.id)}</div>
-                        <div class="asset-type ${this.escapeHtml(asset.type)}">${this.escapeHtml(asset.type)}</div>
+                        <div class="asset-type ${this.escapeHtml(asset.type)}">${this.escapeHtml(assetType)}</div>
                     </div>
                 </div>
                 <div class="asset-description">

@@ -728,3 +728,81 @@ describe('App pagination offset', () => {
         expect(errorSpy).not.toHaveBeenCalled();
     });
 });
+
+describe('App cached form references', () => {
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <form id="searchForm">
+                <input id="query" type="text" value="madrid">
+                <select id="type"><option value="inmueble" selected>Inmueble</option></select>
+                <input id="priceMin" type="number" value="1000">
+                <input id="priceMax" type="number" value="5000">
+                <input id="dateFrom" type="date" value="2024-01-01">
+                <input id="dateTo" type="date" value="2024-12-31">
+                <select id="limit"><option value="50" selected>50</option></select>
+            </form>
+            <section class="results-section">
+                <div id="resultsContainer"></div>
+                <div id="resultsCount"></div>
+                <div id="loadingIndicator"></div>
+                <div id="paginationControls">
+                    <button id="prevBtn"></button>
+                    <button id="nextBtn"></button>
+                    <span id="pageInfo"></span>
+                </div>
+            </section>
+        `;
+        global.fetch = jest.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({ assets: [], total: 0, limit: 50, offset: 0 }),
+        });
+        window.scrollTo = jest.fn();
+    });
+
+    test('fields are resolved once in the constructor', () => {
+        const app = new App();
+
+        expect(app.fields.query.id).toBe('query');
+        expect(app.fields.limit.id).toBe('limit');
+        expect(Object.keys(app.fields)).toHaveLength(7);
+    });
+
+    test('searching does not query the DOM for fields again', async () => {
+        const app = new App();
+        const spy = jest.spyOn(document, 'getElementById');
+
+        await app.handleSearch({ preventDefault: jest.fn() });
+
+        // Only the pagination elements are looked up, never the form fields.
+        const requested = spy.mock.calls.map((call) => call[0]);
+        expect(requested).not.toContain('query');
+        expect(requested).not.toContain('priceMin');
+        expect(requested).not.toContain('limit');
+
+        spy.mockRestore();
+    });
+
+    test('filters are still read from the live field values', async () => {
+        const app = new App();
+
+        await app.handleSearch({ preventDefault: jest.fn() });
+
+        expect(app.lastSearchQuery).toBe('madrid');
+        expect(app.lastSearchFilters).toEqual({
+            type: 'inmueble',
+            price_min: 1000,
+            price_max: 5000,
+            date_from: '2024-01-01',
+            date_to: '2024-12-31',
+        });
+    });
+
+    test('a value changed after construction is picked up', async () => {
+        const app = new App();
+        document.getElementById('query').value = 'barcelona';
+
+        await app.handleSearch({ preventDefault: jest.fn() });
+
+        expect(app.lastSearchQuery).toBe('barcelona');
+    });
+});
