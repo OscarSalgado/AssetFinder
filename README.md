@@ -24,8 +24,8 @@ Acceso rápido:
 - Setup base, Backend (DB + Parser + Persistencia), Frontend (UI + Integration + Features), Security Hardening
 
 **Métricas Finales**:
-- 682 tests (465 backend + 217 frontend)
-- 98.87% backend coverage, 100% statement / 93.45% branch frontend
+- 739 tests (522 backend + 217 frontend)
+- 99.10% backend coverage, 100% statement / 93.45% branch frontend
 - Rate limiting, validación de entrada y cabeceras de seguridad activas
 
 **Rendimiento** (ver `make bench` y `EFFICIENCY_TODO.md`):

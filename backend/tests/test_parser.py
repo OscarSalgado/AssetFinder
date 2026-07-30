@@ -206,26 +206,8 @@ class TestAssetParser:
         results = parser.parse_response(html)
 
         assert len(results) == 1
-        # Known defect: the thousands separator is read as the decimal group, so
-        # "150.000€" yields 0.0. The xfail below states the intended behaviour.
-        assert results[0]["price_initial"] == 0.0
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Thousands separator breaks price extraction: '150.000€' parses as 0.0",
-    )
-    def test_price_with_thousands_separator(self, parser):
-        """Test a Spanish-formatted price is read as its real value"""
-        html = """
-        <div class="asset">
-            <span>Asset</span>
-            <span>150.000€</span>
-            <span>2024-01-01</span>
-            <p>Description</p>
-        </div>
-        """
-        results = parser.parse_response(html)
-
+        # "." groups thousands in Spanish notation, so this is 150000, not 0.0
+        # and not 150.0.
         assert results[0]["price_initial"] == 150000.0
 
     def test_extract_price_comma_separator(self, parser):
@@ -238,26 +220,10 @@ class TestAssetParser:
             <p>Description</p>
         </div>
         """
-        # Known defect: the price hint pattern needs two digits right after the
-        # euro sign, so "€ 1.234,56" is not even recognised as an asset.
-        assert parser.parse_response(html) == []
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason="'€ 1.234,56' is not detected as an asset at all",
-    )
-    def test_price_with_comma_decimal_is_detected(self, parser):
-        """Test a price written with a comma decimal is recognised"""
-        html = """
-        <div class="asset">
-            <span>Asset</span>
-            <span>€ 1.234,56</span>
-            <span>2024-01-01</span>
-            <p>Description</p>
-        </div>
-        """
         results = parser.parse_response(html)
 
+        # "," is the decimal mark, so this is 1234.56 and the element is
+        # recognised as an asset in the first place.
         assert len(results) == 1
         assert results[0]["price_initial"] == 1234.56
 
@@ -275,27 +241,9 @@ class TestAssetParser:
         results = parser.parse_response(html)
 
         assert len(results) == 1
-        # Known defect: the puja pattern requires a decimal separator, so
-        # "Puja mínima: 800€" is missed and price_min falls back to the initial.
-        assert results[0]["price_min"] == results[0]["price_initial"] == 1000.0
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Puja without decimals is ignored, so price_min equals price_initial",
-    )
-    def test_minimum_price_without_decimals(self, parser):
-        """Test a whole-euro minimum bid is picked up"""
-        html = """
-        <div class="asset">
-            <span>Asset</span>
-            <span>Initial: 1000€</span>
-            <span>Puja mínima: 800€</span>
-            <span>2024-01-01</span>
-            <p>Description</p>
-        </div>
-        """
-        results = parser.parse_response(html)
-
+        # The minimum bid is read even without decimals, and it is not a copy of
+        # the initial price.
+        assert results[0]["price_initial"] == 1000.0
         assert results[0]["price_min"] == 800.0
 
     def test_extract_date_dd_mm_yyyy(self, parser):
@@ -923,7 +871,301 @@ class TestElementWrappers:
         text = elem.get_text()
 
         assert parser._extract_type(elem) == parser._type_from(text)
-        assert parser._extract_price(elem) == parser._price_from(text, "inicial")
+        assert parser._extract_price(elem) == parser._price_from(text)
+        assert parser._extract_price(elem, "min") == parser._min_price_from(text)
         assert parser._extract_date(elem) == parser._date_from(text)
         assert parser._extract_location(elem) == parser._location_from(text)
         assert parser._extract_description(elem) == parser._description_from(text, elem)
+
+
+class TestAmountParsing:
+    """
+    Spanish price notation, table driven.
+
+    Every one of these formats used to be extracted wrongly: "." was treated as
+    a decimal mark, so a thousands group was silently dropped or became the
+    whole value.
+    """
+
+    @pytest.fixture
+    def parser(self):
+        return AssetParser()
+
+    def _asset(self, price):
+        return f"""
+        <div class="asset-item">
+            <h3>Piso en Madrid centro amplio</h3>
+            <span>{price}</span>
+            <span>15/03/2024</span>
+        </div>
+        """
+
+    @pytest.mark.parametrize(
+        ("price", "expected"),
+        [
+            ("150.000€", 150000.0),
+            ("800€", 800.0),
+            ("€ 1.234,56", 1234.56),
+            ("1.234,56€", 1234.56),
+            ("8.500,00€", 8500.0),
+            ("€ 8.500,00", 8500.0),
+            ("1.234.567,89€", 1234567.89),
+            ("99,99€", 99.99),
+            ("500 €", 500.0),
+            ("€500", 500.0),
+            ("0€", 0.0),
+            ("150.000,50€", 150000.5),
+        ],
+    )
+    def test_price_formats(self, parser, price, expected):
+        """Test each Spanish price format is read at its real value"""
+        results = parser.parse_response(self._asset(price))
+
+        assert len(results) == 1, f"{price} was not detected as an asset"
+        assert results[0]["price_initial"] == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Piso con 120.000 km recorridos",
+            "3 habitaciones y 2 banos",
+            "Referencia 2024 del expediente",
+            "No price here",
+        ],
+    )
+    def test_figures_without_euro_are_not_prices(self, parser, text):
+        """Test the euro sign is required, so stray figures are not prices"""
+        assert parser._price_from(text) == 0.0
+
+    def test_parse_amount_helper(self):
+        """Test the conversion helper directly"""
+        from src.parser import parse_amount
+
+        assert parse_amount("1.234.567,89") == 1234567.89
+        assert parse_amount("150.000") == 150000.0
+        assert parse_amount("99,99") == 99.99
+        assert parse_amount("500") == 500.0
+
+
+class TestMinimumBid:
+    """The minimum bid must be the stated one, or nothing"""
+
+    @pytest.fixture
+    def parser(self):
+        return AssetParser()
+
+    def _asset(self, extra=""):
+        return f"""
+        <div class="asset-item">
+            <h3>Piso en Madrid centro amplio</h3>
+            <span>1000€</span>
+            {extra}
+            <span>15/03/2024</span>
+        </div>
+        """
+
+    @pytest.mark.parametrize(
+        ("fragment", "expected"),
+        [
+            ("<span>Puja mínima: 800€</span>", 800.0),
+            ("<span>Puja mínima: 6.500€</span>", 6500.0),
+            ("<span>Puja minima 120.000,00 €</span>", 120000.0),
+            ("<span>Puja: 99,50€</span>", 99.5),
+        ],
+    )
+    def test_minimum_bid_is_read(self, parser, fragment, expected):
+        """Test the stated minimum bid is extracted, decimals or not"""
+        results = parser.parse_response(self._asset(fragment))
+
+        assert results[0]["price_min"] == expected
+
+    def test_absent_minimum_bid_is_none(self, parser):
+        """
+        Test a listing without a minimum bid reports None.
+
+        It used to fall back to the generic price patterns, so price_min became
+        a copy of price_initial and claimed a figure the portal never published.
+        """
+        results = parser.parse_response(self._asset())
+
+        assert results[0]["price_initial"] == 1000.0
+        assert results[0]["price_min"] is None
+
+    def test_minimum_bid_does_not_reach_a_distant_amount(self, parser):
+        """Test the keyword match cannot jump over other figures"""
+        text = "Puja mínima no publicada. Otros lotes desde 5.000€ hasta 9.000€"
+
+        assert parser._min_price_from(text) is None
+
+
+class TestTypeClassification:
+    """Type drives the main filter, so real auction vocabulary must classify"""
+
+    @pytest.fixture
+    def parser(self):
+        return AssetParser()
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Piso de 3 habitaciones", "inmueble"),
+            ("Nave industrial en polígono", "inmueble"),
+            ("Local comercial a pie de calle", "inmueble"),
+            ("Plaza de garaje en Madrid", "inmueble"),
+            ("Solar urbano sin edificar", "inmueble"),
+            ("Finca rústica de regadío", "inmueble"),
+            ("Vehículo Toyota Corolla", "vehiculo"),
+            ("Camión de reparto", "vehiculo"),
+            ("Furgoneta Ford Transit", "vehiculo"),
+            ("Motocicleta Honda", "vehiculo"),
+            ("Sofá de 3 plazas en tela", "mueble"),
+            ("Sofa de 3 plazas", "mueble"),
+            ("Armario de roble macizo", "mueble"),
+            ("Lote de mobiliario de oficina", "inmueble"),
+            ("Lote de joyas variadas", "otros"),
+            ("Objeto sin clasificar", "otros"),
+        ],
+    )
+    def test_type_classification(self, parser, text, expected):
+        """Test each vocabulary item lands in the right family"""
+        assert parser._type_from(text) == expected
+
+    def test_accented_and_unaccented_spellings_agree(self, parser):
+        """Test listings using either spelling classify the same"""
+        assert parser._type_from("Sofá nuevo") == parser._type_from("Sofa nuevo")
+        assert parser._type_from("Camión grúa") == parser._type_from("Camion grua")
+
+
+class TestLocationExtraction:
+    """Spanish place names carry accents and several words"""
+
+    @pytest.fixture
+    def parser(self):
+        return AssetParser()
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Localización: Madrid", "Madrid"),
+            ("Ubicación: Barcelona", "Barcelona"),
+            ("Provincia: Sevilla", "Sevilla"),
+            ("Madrid, España", "Madrid"),
+            ("Málaga, España", "Málaga"),
+            ("A Coruña, España", "A Coruña"),
+            ("San Sebastián, España", "San Sebastián"),
+            ("Piso amplio en Madrid, España", "Madrid"),
+        ],
+    )
+    def test_location_extraction(self, parser, text, expected):
+        """Test the place name is captured intact"""
+        assert parser._location_from(text) == expected
+
+    def test_location_does_not_swallow_a_following_date(self, parser):
+        """
+        Test the capture stops before a date.
+
+        Adjacent text nodes are joined, so an unbounded capture produced
+        "Madrid15/03/2024" as the location.
+        """
+        assert parser._location_from("Localización: Madrid 15/03/2024") == "Madrid"
+
+    def test_missing_location_is_none(self, parser):
+        """Test text without a place yields None"""
+        assert parser._location_from("Sin datos de ubicacion") is None
+
+
+class TestStableIdentifier:
+    """A listing without an id must still get a stable one"""
+
+    @pytest.fixture
+    def parser(self):
+        return AssetParser()
+
+    HTML = """
+    <div class="asset-item">
+        <h3>Lote de joyas variadas</h3>
+        <span>1000€</span>
+        <span>15/03/2024</span>
+    </div>
+    """
+
+    def test_same_listing_yields_the_same_id(self, parser):
+        """
+        Test the fallback id is derived from content, not from the clock.
+
+        A clock-based id changed on every scrape, so INSERT OR REPLACE never
+        matched and each sync appended duplicate rows.
+        """
+        ids = {parser.parse_response(self.HTML)[0]["id"] for _ in range(3)}
+
+        assert len(ids) == 1
+
+    def test_different_listings_yield_different_ids(self, parser):
+        """Test genuinely different listings do not collide"""
+        other = self.HTML.replace("joyas variadas", "cuadros antiguos")
+
+        first = parser.parse_response(self.HTML)[0]["id"]
+        second = parser.parse_response(other)[0]["id"]
+
+        assert first != second
+
+    def test_fallback_id_has_a_stable_shape(self, parser):
+        """Test the generated id is a short prefixed digest"""
+        asset_id = parser.parse_response(self.HTML)[0]["id"]
+
+        assert asset_id.startswith("SSSS-")
+        assert len(asset_id) == len("SSSS-") + 16
+
+    def test_explicit_id_wins_over_the_fallback(self, parser):
+        """Test a listing that carries an id keeps it"""
+        html = self.HTML.replace(
+            '<div class="asset-item">', '<div class="asset-item" data-id="REAL-1">'
+        )
+
+        assert parser.parse_response(html)[0]["id"] == "REAL-1"
+
+    def test_fingerprint_helper_is_deterministic(self):
+        """Test the helper itself is stable and order sensitive"""
+        from src.parser import content_fingerprint
+
+        assert content_fingerprint("a", 1, None) == content_fingerprint("a", 1, None)
+        assert content_fingerprint("a", 1) != content_fingerprint(1, "a")
+
+
+class TestTextJoining:
+    """Adjacent text nodes must not be glued together"""
+
+    @pytest.fixture
+    def parser(self):
+        return AssetParser()
+
+    def test_description_words_are_not_glued(self, parser):
+        """Test a short title followed by prose keeps the word boundary"""
+        html = """
+        <div class="asset-item">
+            <h3>Piso</h3>
+            <p>Descripcion mas larga del bien</p>
+            <span>1000€</span>
+            <span>15/03/2024</span>
+        </div>
+        """
+        description = parser.parse_response(html)[0]["description"]
+
+        assert "PisoDescripcion" not in description
+        assert "Piso Descripcion" in description
+
+    def test_price_is_found_when_it_follows_text_directly(self, parser):
+        """
+        Test an amount glued to the preceding word is still read.
+
+        The old pattern used \\b, which failed on "...amplio800€" and returned
+        0.0 for a perfectly valid price.
+        """
+        html = """
+        <div class="asset-item">
+            <h3>Piso en Madrid centro amplio</h3><span>800€</span>
+            <span>15/03/2024</span>
+        </div>
+        """
+
+        assert parser.parse_response(html)[0]["price_initial"] == 800.0

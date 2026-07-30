@@ -1,8 +1,11 @@
-# AssetFinder — Code Review y TODO de Eficiencia
+# AssetFinder — Code Review, Eficiencia y Corrección de Datos
 
 Resultado de una revisión completa del código (backend, frontend, CI y
-configuración), ejecutada en dos fases. **Toda cifra de este documento está
-medida con `make bench`, no estimada.**
+configuración). **Toda cifra de este documento está medida, no estimada.**
+
+La revisión empezó por eficiencia y acabó destapando algo más grave: la
+extracción de datos del parser estaba mal en casi todos los campos. Ver
+«Corrección de datos» más abajo.
 
 La regla que ha guiado el trabajo: medir antes de implementar y descartar lo que
 no se paga a sí mismo. Cuatro tareas propuestas en la revisión inicial fueron
@@ -187,22 +190,97 @@ regresión.
   `rejects.toThrow`.
 - Variables asignadas y nunca leídas en tests y en `server.js`.
 
-## Defectos del parser destapados por los tests placebo
+## Corrección de datos ✅
 
-Los tres están documentados con `@pytest.mark.xfail(strict=True)`: el test
-declara el comportamiento correcto y, cuando alguien lo arregle, avisará.
+Los tests placebo que destapó eslint escondían tres defectos de precio. Al
+medirlos con formatos reales, el alcance era mucho mayor: **la extracción estaba
+mal en casi todos los campos**. No era rendimiento, eran los datos que dan
+sentido a la aplicación.
 
-- [ ] **Separador de miles.** `150.000€` se parsea como **0.0**: el patrón
-      `\b(\d{3,})\s*€` captura «000» del grupo de miles. Es el formato normal
-      de precio en España, así que probablemente afecte a datos reales.
-- [ ] **Coma decimal.** `€ 1.234,56` **no se detecta como activo**: el patrón de
-      pista de precio exige dos dígitos justo tras el `€`, y aquí hay uno.
-- [ ] **Puja mínima sin decimales.** `Puja mínima: 800€` se ignora porque
-      `RE_PUJA` exige separador decimal, y `price_min` acaba igualando a
-      `price_initial`.
+### Importes: 7 de 8 formatos mal
+
+| En el HTML | Antes | Ahora |
+|---|---:|---:|
+| `150.000€` | **0.0** | 150000.0 |
+| `800€` | **0.0** | 800.0 |
+| `€ 1.234,56` | no se detectaba el activo | 1234.56 |
+| `1.234,56€` | 234.56 | 1234.56 |
+| `8.500,00€` | 500.0 | 8500.0 |
+| `€ 8.500,00` | 8.5 | 8500.0 |
+| `1.234.567,89€` | 567.89 | 1234567.89 |
+| `99,99€` | 99.99 ✓ | 99.99 |
+
+La causa: el código trataba `.` y `,` como separador decimal indistintamente,
+cuando en notación española `.` agrupa millares. Ahora hay un patrón único
+(`AMOUNT`) que entiende la convención es-ES, y `parse_amount()` convierte. Sigue
+exigiendo el `€`, así que `120.000 km` o `3 habitaciones 2024` no se confunden
+con precios.
+
+### Tipos: 8 de 10 bienes reales como «otros»
+
+`type` alimenta el filtro principal de la aplicación, así que sobre datos reales
+el filtro apenas servía. `Sofá` (por el acento), `Camión`, `Furgoneta`,
+`Nave industrial`, `Local comercial`, `Garaje`, `Solar` y `Armario` caían todos
+en «otros». `TYPE_KEYWORDS` pasa de 19 a 63 términos con el vocabulario real de
+subastas y las variantes acentuadas.
+
+### Ubicaciones con acento o varias palabras: `None`
+
+`Málaga`, `A Coruña` y `San Sebastián` no se extraían, porque el patrón era
+`[A-Z][a-z]+`: ASCII y una sola palabra. Ahora acepta acentos, la primera
+palabra de una sola letra («A Coruña») y hasta cuatro palabras, exigiendo que
+las siguientes vayan en mayúscula para no arrastrar prosa en minúsculas.
+
+### Puja mínima inventada
+
+Si el anuncio no indicaba puja, `price_min` caía en los patrones genéricos y
+acababa siendo **una copia de `price_initial`**: afirmaba una cifra que el portal
+no publica. Ahora es `None` cuando no hay puja (el esquema ya admite NULL y el
+frontend ya muestra «N/A»). Y la puja se lee aunque no lleve decimales, con la
+ventana acotada para no cruzar un punto o un `;` y capturar un importe de otra
+frase.
+
+### Ids por reloj que duplicaban filas
+
+Cuando un anuncio no traía identificador, el id de repuesto era
+`f"SSSS-{utc_now().timestamp()}"`. **Cambiaba en cada scrape**, así que el
+`INSERT OR REPLACE` nunca casaba y cada sincronización insertaba de nuevo los
+mismos bienes en lugar de actualizarlos. Ahora es un hash determinista del
+contenido: verificado que sincronizar tres veces deja 3 filas y no 9.
+
+### Causa raíz común: nodos de texto pegados
+
+`get_text()` se llamaba sin separador, así que los nodos adyacentes se unían. De
+ahí salían tres síntomas que parecían independientes:
+`Localización: Madrid15/03/2024` metía la fecha en la ubicación, las
+descripciones daban `PisoDescripcion`, y el `\b` del patrón de precio fallaba en
+`...amplio800€` (por eso `800€` daba 0.0). Un separador en una sola llamada los
+corta de raíz.
+
+### Ejemplo completo, antes y después
+
+Tres anuncios sin `data-id`, con formato de precio español:
+
+| Bien | Antes | Ahora |
+|---|---|---|
+| Nave industrial, Sevilla | `otros`, 0.0 €, puja 120,00 € | `inmueble`, 150000.0 €, puja 120000.0 € |
+| Furgoneta, A Coruña | `otros`, 500.0 €, sin ubicación | `vehiculo`, 8500.0 €, `A Coruña` |
+| Sofá, Málaga | `otros`, 500.0 €, sin ubicación | `mueble`, 500.0 €, `Málaga` |
+
+Coste en rendimiento: **ninguno**. Comparando ambos parsers en el mismo proceso
+para eliminar la deriva de la máquina, el cociente es **0,981×**. Una lectura
+suelta del benchmark sugirió un 36% de degradación; al perfilarlo, mis cambios
+suman ~3 ms sobre ~270 y la diferencia era ruido. El verdadero punto caliente es
+`_description_from`, con 91 de los 125 ms de la extracción, y es anterior a estos
+cambios (ver pendientes).
 
 ## Pendiente
 
+- [ ] **`_description_from` hace 7 consultas CSS por elemento.** Es el punto
+      caliente real del parser: 91 de los 125 ms de la extracción. Combinar los
+      selectores en uno cambiaría la semántica (hoy toma el primer resultado de
+      cada selector, en orden de selector, no en orden de documento), así que
+      requiere cuidado y su propio test de equivalencia.
 - [ ] **Formateo automático.** `ruff format` reformatearía 14 ficheros. Se dejó
       fuera para no mezclar un diff puramente estético con los cambios de fondo;
       el linter sí está en CI.
@@ -229,7 +307,7 @@ declara el comportamiento correcto y, cuando alguien lo arregle, avisará.
 
 ```bash
 make bench                  # rendimiento (backend + frontend)
-cd backend && pytest        # 465 tests + 3 xfail, gate de cobertura al 98%
+cd backend && pytest        # 522 tests, gate de cobertura al 98%
 cd frontend && npm test     # 217 tests
 make lint                   # ruff + eslint, sin hallazgos
 make prod-run               # arranca con gunicorn como en producción

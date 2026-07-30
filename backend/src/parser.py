@@ -1,3 +1,4 @@
+import hashlib
 import re
 from typing import Any
 
@@ -6,25 +7,71 @@ from bs4 import BeautifulSoup
 from .timeutils import utc_now
 
 # Patterns are compiled once at import instead of on every call.
-RE_PRICE_HINT = re.compile(r"\d{2,}\s*€|€\s*\d{2,}")
+
+# Amount in Spanish notation: "." groups thousands in runs of three and "," is
+# the decimal mark, so "1.234.567,89" is one million two hundred thousand and
+# not one point something. Deliberately no \b: adjacent text nodes are joined by
+# get_text, and a word boundary would miss the amount in "...amplio800€".
+AMOUNT = r"\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:,\d{1,2})?"
+
+# The euro sign is required, so plain figures such as "120.000 km" or
+# "3 habitaciones" are never mistaken for a price.
+RE_AMOUNT_EUR = re.compile(rf"({AMOUNT})\s*€|€\s*({AMOUNT})")
+
+# Decides whether an element looks like an asset at all; same notation, so a
+# price written as "€ 1.234,56" is recognised.
+RE_PRICE_HINT = re.compile(rf"(?:{AMOUNT})\s*€|€\s*(?:{AMOUNT})")
+
+# Minimum bid. The gap after the keyword excludes digits (so the match cannot
+# skip over another figure) and also "." and ";" (so it cannot cross a sentence
+# boundary and pick up an amount belonging to a different statement, as in
+# "Puja mínima no publicada. Otros lotes desde 5.000€").
+RE_PUJA = re.compile(
+    rf"(?:puja|tipo de subasta)[^\d.;]{{0,30}}({AMOUNT})\s*€", re.IGNORECASE
+)
+
 RE_ID_CODE = re.compile(r"[A-Z]+-\d{4}-\d{3,}")
 RE_ID_DIGITS = re.compile(r"\b(\d{6,})\b")
-RE_PUJA = re.compile(r"puja.*?(\d+)[.,](\d{2})", re.IGNORECASE)
-RE_PRICES = (
-    re.compile(r"(\d+)[.,](\d{2})\s*€"),
-    re.compile(r"€\s*(\d+)[.,](\d{2})"),
-    re.compile(r"\b(\d{3,})\s*€"),
-)
 RE_DATES = (
     re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})"),
     re.compile(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})"),
 )
+
+# Spanish place names carry accents and often several words ("A Coruña",
+# "San Sebastián"), which an [A-Z][a-z]+ pattern misses entirely.
+# The first word may be a single letter ("A Coruña") and later words must be
+# capitalised too, which stops the match from running through ordinary lowercase
+# prose such as "Piso en Madrid".
+PLACE = r"[A-ZÁÉÍÓÚÑ][^\W\d_]*(?:[ -][A-ZÁÉÍÓÚÑ][^\W\d_]*){0,3}"
+
 RE_LOCATIONS = (
-    re.compile(r"Localización:\s*([^,\n]+)"),
-    re.compile(r"Ubicación:\s*([^,\n]+)"),
-    re.compile(r"Provincia:\s*([^,\n]+)"),
-    re.compile(r"([A-Z][a-z]+),\s*España"),
+    # Stop at a digit or a comma: without that bound, joined text nodes make
+    # "Localización: Madrid 15/03/2024" capture the date as part of the place.
+    re.compile(rf"Localizaci[óo]n:\s*({PLACE})"),
+    re.compile(rf"Ubicaci[óo]n:\s*({PLACE})"),
+    re.compile(rf"Provincia:\s*({PLACE})"),
+    re.compile(rf"({PLACE}),\s*España"),
 )
+
+
+def parse_amount(raw: str) -> float:
+    """Convert a Spanish-formatted amount into a float."""
+    return float(raw.replace(".", "").replace(",", "."))
+
+
+def content_fingerprint(*parts: Any) -> str:
+    """
+    Deterministic id derived from a listing's own content.
+
+    Used when a listing exposes no usable identifier. The previous fallback was
+    built from the clock, so the same listing got a different id on every
+    scrape: INSERT OR REPLACE never matched and each sync appended duplicate
+    rows instead of updating them. A content hash keeps the id stable across
+    runs while still separating genuinely different listings.
+    """
+    joined = "|".join("" if part is None else str(part) for part in parts)
+    digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
+    return f"SSSS-{digest[:16]}"
 
 ASSET_KEYWORDS = (
     "subasta",
@@ -37,10 +84,38 @@ ASSET_KEYWORDS = (
     "vehículo",
 )
 
+# Checked in order, so the first matching family wins. The vocabulary comes from
+# what auction listings actually say; the previous list classified 8 of 10 real
+# items as "otros", which made the type filter useless on real data. Accented and
+# unaccented spellings are both listed because listings use either.
 TYPE_KEYWORDS = (
-    ("inmueble", ("piso", "casa", "inmueble", "apartamento", "terreno", "propiedad")),
-    ("vehiculo", ("coche", "carro", "vehículo", "auto", "vehiculo", "moto", "bicicleta")),
-    ("mueble", ("mueble", "sofa", "silla", "mesa", "escritorio", "cama")),
+    (
+        "inmueble",
+        (
+            "piso", "casa", "inmueble", "apartamento", "terreno", "propiedad",
+            "vivienda", "nave", "local", "garaje", "solar", "finca", "parcela",
+            "chalet", "chalé", "trastero", "oficina", "duplex", "dúplex",
+            "atico", "ático", "rustica", "rústica", "urbana",
+        ),
+    ),
+    (
+        "vehiculo",
+        (
+            "coche", "carro", "vehículo", "vehiculo", "auto", "moto",
+            "bicicleta", "camión", "camion", "furgoneta", "furgon", "furgón",
+            "remolque", "tractor", "motocicleta", "turismo", "ciclomotor",
+            "autocaravana", "caravana", "quad",
+        ),
+    ),
+    (
+        "mueble",
+        (
+            "mueble", "mobiliario", "sofa", "sofá", "silla", "mesa",
+            "escritorio", "cama", "armario", "estanteria", "estantería",
+            "butaca", "comoda", "cómoda", "aparador", "electrodomestico",
+            "electrodoméstico", "lavadora", "nevera",
+        ),
+    ),
 )
 
 DESCRIPTION_SELECTORS = (
@@ -147,7 +222,7 @@ class AssetParser:
 
     def _looks_like_asset_item(self, element) -> bool:
         """Check if element looks like an asset item"""
-        text = element.get_text()
+        text = element.get_text(" ", strip=True)
 
         # Check for price patterns or asset keywords
         has_price = bool(RE_PRICE_HINT.search(text))
@@ -162,11 +237,11 @@ class AssetParser:
         asset = {}
 
         # get_text() walks the whole subtree, so it is read once here and reused
-        # for every field instead of once per field.
-        text = item.get_text()
-
-        # Extract ID
-        asset["id"] = self._id_from(text, item) or f"SSSS-{utc_now().timestamp()}"
+        # for every field instead of once per field. The separator matters: with
+        # the default, adjacent text nodes are glued together, which produced
+        # descriptions like "PisoDescripcion" and made the location swallow the
+        # date that followed it.
+        text = item.get_text(" ", strip=True)
 
         # Extract type
         asset["type"] = self._type_from(text)
@@ -175,14 +250,24 @@ class AssetParser:
         asset["description"] = self._description_from(text, item)
 
         # Extract prices
-        asset["price_initial"] = self._price_from(text, "inicial")
-        asset["price_min"] = self._price_from(text, "min")
+        asset["price_initial"] = self._price_from(text)
+        asset["price_min"] = self._min_price_from(text)
 
         # Extract dates
         asset["date_subasta"] = self._date_from(text)
 
         # Extract location
         asset["location"] = self._location_from(text)
+
+        # Extract ID last: the fallback fingerprints the fields above, so it has
+        # to run once they are known.
+        asset["id"] = self._id_from(text, item) or content_fingerprint(
+            asset["description"],
+            asset["price_initial"],
+            asset["date_subasta"],
+            asset["location"],
+            asset["type"],
+        )
 
         return asset
 
@@ -231,7 +316,7 @@ class AssetParser:
         for selector in DESCRIPTION_SELECTORS:
             elem = element.select_one(selector)
             if elem:
-                selector_text = elem.get_text().strip()
+                selector_text = elem.get_text(" ", strip=True)
                 if selector_text and len(selector_text) > 5:
                     descriptions.append(selector_text)
 
@@ -245,25 +330,33 @@ class AssetParser:
 
         return " ".join(descriptions)[:500] if descriptions else "Asset without description"
 
-    def _price_from(self, text: str, price_type: str = "inicial") -> float:
-        """Extract price from text"""
-        # Prioritize based on price_type
-        if price_type.lower() == "min":
-            # Look for minimum/puja
-            min_section = RE_PUJA.search(text)
-            if min_section:
-                return float(min_section.group(1).replace(",", "."))
+    def _price_from(self, text: str) -> float:
+        """
+        Extract the initial price from text.
 
-        for pattern in RE_PRICES:
-            match = pattern.search(text)
-            if match:
-                # Handle both comma and dot as decimal separator
-                groups = match.groups()
-                if len(groups) >= 2:
-                    return float(f"{groups[0]}.{groups[1]}")
-                return float(groups[0].replace(".", ""))
+        Returns 0.0 when the text carries no euro amount.
+        """
+        match = RE_AMOUNT_EUR.search(text)
+        if not match:
+            return 0.0
 
-        return 0.0
+        # Exactly one of the two alternatives captures.
+        return parse_amount(match.group(1) or match.group(2))
+
+    def _min_price_from(self, text: str) -> float | None:
+        """
+        Extract the minimum bid from text.
+
+        Returns None when the listing states no minimum bid. It deliberately
+        does not fall back to the generic price patterns: doing so made
+        price_min a copy of price_initial, asserting a figure the portal never
+        published.
+        """
+        match = RE_PUJA.search(text)
+        if not match:
+            return None
+
+        return parse_amount(match.group(1))
 
     def _date_from(self, text: str) -> str:
         """Extract subasta date from text"""
@@ -299,27 +392,30 @@ class AssetParser:
 
     def _extract_id(self, element) -> str | None:
         """Extract unique ID from asset element"""
-        return self._id_from(element.get_text(), element)
+        return self._id_from(element.get_text(" ", strip=True), element)
 
     def _extract_type(self, element) -> str:
         """Extract asset type (inmueble, vehiculo, mueble, otros)"""
-        return self._type_from(element.get_text())
+        return self._type_from(element.get_text(" ", strip=True))
 
     def _extract_description(self, element) -> str:
         """Extract asset description"""
-        return self._description_from(element.get_text(), element)
+        return self._description_from(element.get_text(" ", strip=True), element)
 
-    def _extract_price(self, element, price_type: str = "inicial") -> float:
+    def _extract_price(self, element, price_type: str = "inicial"):
         """Extract price from asset element"""
-        return self._price_from(element.get_text(), price_type)
+        text = element.get_text(" ", strip=True)
+        if price_type.lower() == "min":
+            return self._min_price_from(text)
+        return self._price_from(text)
 
     def _extract_date(self, element) -> str:
         """Extract subasta date from element"""
-        return self._date_from(element.get_text())
+        return self._date_from(element.get_text(" ", strip=True))
 
     def _extract_location(self, element) -> str | None:
         """Extract location from element"""
-        return self._location_from(element.get_text())
+        return self._location_from(element.get_text(" ", strip=True))
 
     def _validate_asset(self, asset: dict[str, Any]) -> bool:
         """Validate that asset has required fields"""
