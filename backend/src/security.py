@@ -3,13 +3,13 @@ Security module for AssetFinder API
 Provides rate limiting, input validation, and security utilities
 """
 
-import time
+import hashlib
 import logging
 import re
-import hashlib
-from typing import Dict, Tuple, Optional, Any
+import time
 from collections import defaultdict, deque
 from datetime import datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class RateLimiter:
     def __init__(self, max_requests: int = 100, window_seconds: int = 3600):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
-        self.requests: Dict[str, deque] = defaultdict(deque)
+        self.requests: dict[str, deque] = defaultdict(deque)
         self._checks_since_sweep = 0
 
     def _drop_expired(self, timestamps: deque, now: float) -> None:
@@ -133,7 +133,7 @@ class InputValidator:
     MAX_LIMIT = 10000
 
     @staticmethod
-    def validate_query(query: str) -> Tuple[bool, Optional[str]]:
+    def validate_query(query: str) -> tuple[bool, str | None]:
         """Validate search query"""
         if not query:
             return True, query.strip()
@@ -160,7 +160,7 @@ class InputValidator:
         return True, sanitized
 
     @staticmethod
-    def validate_asset_id(asset_id: str) -> Tuple[bool, Optional[str]]:
+    def validate_asset_id(asset_id: str) -> tuple[bool, str | None]:
         """Validate asset ID"""
         if not asset_id:
             return False, "Asset ID is required"
@@ -174,7 +174,7 @@ class InputValidator:
         return True, asset_id
 
     @staticmethod
-    def validate_type(asset_type: str) -> Tuple[bool, Optional[str]]:
+    def validate_type(asset_type: str) -> tuple[bool, str | None]:
         """Validate asset type"""
         valid_types = ["inmueble", "vehiculo", "mueble", "otros"]
 
@@ -184,7 +184,7 @@ class InputValidator:
         return True, asset_type
 
     @staticmethod
-    def validate_price(price: float) -> Tuple[bool, Optional[str]]:
+    def validate_price(price: float) -> tuple[bool, str | None]:
         """Validate price value"""
         try:
             price_float = float(price)
@@ -195,7 +195,7 @@ class InputValidator:
             return False, "Invalid price value"
 
     @staticmethod
-    def validate_date(date_str: str) -> Tuple[bool, Optional[str]]:
+    def validate_date(date_str: str) -> tuple[bool, str | None]:
         """Validate date string (YYYY-MM-DD format)"""
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
@@ -204,7 +204,7 @@ class InputValidator:
             return False, "Invalid date format. Use YYYY-MM-DD"
 
     @staticmethod
-    def validate_sort_params(sort_by: str, sort_order: str) -> Tuple[bool, str, str]:
+    def validate_sort_params(sort_by: str, sort_order: str) -> tuple[bool, str, str]:
         """Validate sort parameters"""
         valid_sorts = ["price_initial", "date_subasta", "id", "type"]
         valid_orders = ["ASC", "DESC"]
@@ -221,7 +221,7 @@ class InputValidator:
         return True, sort_by, sort_order
 
     @staticmethod
-    def validate_pagination(limit: int, offset: int) -> Tuple[int, int]:
+    def validate_pagination(limit: int, offset: int) -> tuple[int, int]:
         """Validate and normalize pagination parameters"""
         limit = max(1, min(int(limit or 50), InputValidator.MAX_LIMIT))
         offset = max(0, min(int(offset or 0), InputValidator.MAX_OFFSET))
@@ -232,7 +232,7 @@ class SecurityHeaders:
     """Security headers configuration"""
 
     @staticmethod
-    def get_security_headers(origin: Optional[str] = None) -> Dict[str, str]:
+    def get_security_headers(origin: str | None = None) -> dict[str, str]:
         """Get security headers for responses"""
         headers = {
             # Prevent MIME type sniffing
@@ -291,7 +291,7 @@ class SecurityHeaders:
         return headers
 
 
-def log_security_event(event_type: str, details: Dict[str, Any], level: str = "INFO"):
+def log_security_event(event_type: str, details: dict[str, Any], level: str = "INFO"):
     """Log security-related events"""
     message = f"SECURITY[{event_type}] {details}"
 

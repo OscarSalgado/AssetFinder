@@ -1,3 +1,5 @@
+# Runtime dependencies only. Test and lint tooling lives in
+# requirements-dev.txt so a production image does not install pytest.
 requests==2.31.0
 beautifulsoup4==4.12.2
 # Optional but preferred HTML backend: measurably faster than html.parser.
@@ -5,5 +7,5 @@ beautifulsoup4==4.12.2
 # without a prebuilt wheel still works.
 lxml==6.1.1
 flask==3.0.0
-pytest==7.4.2
-pytest-cov==4.1.0
+# Production WSGI server. app.run() is Flask's development server.
+gunicorn==23.0.0

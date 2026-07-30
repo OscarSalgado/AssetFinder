@@ -7,12 +7,12 @@ this project stores and returns, so the helpers below produce the same naive
 UTC representation the schema and the API already use.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def utc_now() -> datetime:
     """Current UTC time as a naive datetime, matching the stored convention."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def utc_now_isoformat() -> str:

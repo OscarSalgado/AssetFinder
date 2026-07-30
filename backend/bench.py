@@ -210,8 +210,9 @@ def bench_parser(items=200):
     get_text() recorre el subarbol completo, asi que llamarlo una vez por campo
     multiplica el coste por el numero de campos extraidos.
     """
-    from src.parser import AssetParser
     import bs4
+
+    from src.parser import AssetParser
 
     parser = AssetParser()
     html = build_page(items)
@@ -247,6 +248,7 @@ def bench_export(assets, tmpdir):
     streaming responde en cuanto tiene el primer lote.
     """
     from werkzeug.test import EnvironBuilder
+
     from src import api as api_module
 
     ruta = Path(tmpdir) / "bench_export.db"

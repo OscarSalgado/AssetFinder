@@ -1,5 +1,7 @@
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import patch, MagicMock
+
 from src.parser import AssetParser, create_parser
 
 
@@ -103,10 +105,17 @@ class TestAssetParser:
 
     def test_extract_id_from_data_attribute(self, parser):
         """Test extracting ID from data-id attribute"""
+        from bs4 import BeautifulSoup
+
         html = '<div class="asset" data-id="TEST-123">Asset</div>'
-        results = parser.parse_response(html)
-        # Should extract ID, but might not validate as full asset
-        # Just test that parsing works
+
+        # div.asset is not one of the item selectors and the text carries no
+        # price or keyword, so the fallback does not treat it as an asset.
+        assert parser.parse_response(html) == []
+
+        # The id extraction itself works when handed the element.
+        element = BeautifulSoup(html, parser.parser).find("div")
+        assert parser._extract_id(element) == "TEST-123"
 
     def test_extract_id_from_id_attribute(self, parser):
         """Test extracting ID from id attribute"""
@@ -195,7 +204,29 @@ class TestAssetParser:
         </div>
         """
         results = parser.parse_response(html)
-        # Price should be parsed
+
+        assert len(results) == 1
+        # Known defect: the thousands separator is read as the decimal group, so
+        # "150.000€" yields 0.0. The xfail below states the intended behaviour.
+        assert results[0]["price_initial"] == 0.0
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Thousands separator breaks price extraction: '150.000€' parses as 0.0",
+    )
+    def test_price_with_thousands_separator(self, parser):
+        """Test a Spanish-formatted price is read as its real value"""
+        html = """
+        <div class="asset">
+            <span>Asset</span>
+            <span>150.000€</span>
+            <span>2024-01-01</span>
+            <p>Description</p>
+        </div>
+        """
+        results = parser.parse_response(html)
+
+        assert results[0]["price_initial"] == 150000.0
 
     def test_extract_price_comma_separator(self, parser):
         """Test extracting price with comma separator"""
@@ -207,8 +238,28 @@ class TestAssetParser:
             <p>Description</p>
         </div>
         """
+        # Known defect: the price hint pattern needs two digits right after the
+        # euro sign, so "€ 1.234,56" is not even recognised as an asset.
+        assert parser.parse_response(html) == []
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="'€ 1.234,56' is not detected as an asset at all",
+    )
+    def test_price_with_comma_decimal_is_detected(self, parser):
+        """Test a price written with a comma decimal is recognised"""
+        html = """
+        <div class="asset">
+            <span>Asset</span>
+            <span>€ 1.234,56</span>
+            <span>2024-01-01</span>
+            <p>Description</p>
+        </div>
+        """
         results = parser.parse_response(html)
-        # Should handle comma as decimal
+
+        assert len(results) == 1
+        assert results[0]["price_initial"] == 1234.56
 
     def test_extract_price_minimum(self, parser):
         """Test extracting minimum price"""
@@ -222,7 +273,30 @@ class TestAssetParser:
         </div>
         """
         results = parser.parse_response(html)
-        # Should try to extract minimum price
+
+        assert len(results) == 1
+        # Known defect: the puja pattern requires a decimal separator, so
+        # "Puja mínima: 800€" is missed and price_min falls back to the initial.
+        assert results[0]["price_min"] == results[0]["price_initial"] == 1000.0
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Puja without decimals is ignored, so price_min equals price_initial",
+    )
+    def test_minimum_price_without_decimals(self, parser):
+        """Test a whole-euro minimum bid is picked up"""
+        html = """
+        <div class="asset">
+            <span>Asset</span>
+            <span>Initial: 1000€</span>
+            <span>Puja mínima: 800€</span>
+            <span>2024-01-01</span>
+            <p>Description</p>
+        </div>
+        """
+        results = parser.parse_response(html)
+
+        assert results[0]["price_min"] == 800.0
 
     def test_extract_date_dd_mm_yyyy(self, parser):
         """Test extracting date in DD/MM/YYYY format"""
@@ -263,7 +337,9 @@ class TestAssetParser:
         </div>
         """
         results = parser.parse_response(html)
-        # Should handle different date formats
+
+        assert len(results) == 1
+        assert results[0]["date_subasta"] == "2024-03-15"
 
     def test_extract_location(self, parser):
         """Test extracting location"""
@@ -676,8 +752,9 @@ class TestParserBackendSelection:
 
     def test_default_parser_is_available(self):
         """Test the chosen backend is one BeautifulSoup can build"""
-        from src.parser import DEFAULT_PARSER
         from bs4 import BeautifulSoup
+
+        from src.parser import DEFAULT_PARSER
 
         soup = BeautifulSoup("<div>x</div>", DEFAULT_PARSER)
         assert soup.find("div").get_text() == "x"
@@ -691,6 +768,7 @@ class TestParserBackendSelection:
     def test_falls_back_to_html_parser_without_lxml(self):
         """Test a missing lxml does not break the import"""
         import builtins
+
         from src.parser import _default_parser
 
         real_import = builtins.__import__
@@ -749,8 +827,9 @@ class TestItemSelection:
 
     def test_candidates_are_returned_in_document_order(self):
         """Test items keep the order they appear on the page"""
-        from src.parser import AssetParser
         from bs4 import BeautifulSoup
+
+        from src.parser import AssetParser
 
         html = """
         <div class="lote" data-id="PRIMERO"><h3>Coche Toyota diesel</h3></div>
@@ -770,8 +849,9 @@ class TestItemSelection:
 
     def test_get_text_is_read_once_per_item(self):
         """Test extraction no longer re-walks the subtree for every field"""
-        from src.parser import AssetParser
         import bs4
+
+        from src.parser import AssetParser
 
         html = """
         <div class="asset-item" data-id="SSSS-2024-001">

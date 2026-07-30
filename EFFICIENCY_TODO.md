@@ -143,7 +143,7 @@ regresión.
   API ya usan; en `fetch_assets` se calcula una vez fuera del bucle en lugar de
   dos veces por activo.
 
-## P3 — Limpieza ✅
+## P3 — Limpieza de código ✅
 
 - `ui.js` calculaba `getAssetTypeBadge()` y **descartaba el resultado**: la UI
   mostraba «vehiculo» en lugar de «Vehículo». Corregido conservando
@@ -153,14 +153,61 @@ regresión.
 
 ---
 
+## P3 — Producción y tooling ✅
+
+- **`gunicorn` con configuración propia** (`backend/gunicorn.conf.py`),
+  `wsgi.py`, `Procfile` y `render.yaml`. Un worker con hilos `gthread`, porque
+  SQLite tiene un solo escritor y varios procesos provocarían
+  «database is locked»; `forwarded_allow_ips` para que el rate limiter vea la IP
+  del cliente y no la del proxy.
+- **`app.run` endurecido.** Antes: `app.run(debug=True, host="0.0.0.0")`. El
+  depurador de Werkzeug **ejecuta código arbitrario desde el navegador**, así que
+  exponerlo en todas las interfaces era un agujero de ejecución remota. Ahora el
+  debug es opt-in por entorno y el bind por defecto es loopback.
+- **Requirements separados**: `requirements.txt` (runtime, con `gunicorn`) y
+  `requirements-dev.txt` (pytest, cov, ruff). Un job de *smoke* en CI instala
+  **solo** el set de runtime y arranca gunicorn, así que un import de producción
+  que dependiera de una librería de desarrollo fallaría ahí.
+- **Linters reales**: `ruff` (backend) y `eslint` 9 (frontend) sustituyen al job
+  que solo comprobaba con `ls` que existieran ficheros. `make lint` en local.
+
+### Lo que encontraron los linters
+
+199 hallazgos de ruff y 12 de eslint. La mayoría eran modernizaciones mecánicas
+(`typing.List` → `list`, orden de imports), pero cuatro eran defectos reales:
+
+- **11 `raise ... from e` ausentes** al reenvolver errores de sqlite3: se perdía
+  la cadena de excepciones y con ella la causa original en el traceback.
+- **5 tests del parser que no comprobaban nada**: asignaban el resultado de
+  `parse_response()` y no hacían ninguna aserción. Al escribirles aserciones de
+  verdad salieron a la luz **tres defectos del parser** (abajo).
+- **`fail()` en dos tests de integración**: no es un global de Jest desde la v27,
+  así que su `ReferenceError` habría sido capturado por el `catch` de al lado,
+  dando un mensaje engañoso si el código dejara de lanzar. Reescritos con
+  `rejects.toThrow`.
+- Variables asignadas y nunca leídas en tests y en `server.js`.
+
+## Defectos del parser destapados por los tests placebo
+
+Los tres están documentados con `@pytest.mark.xfail(strict=True)`: el test
+declara el comportamiento correcto y, cuando alguien lo arregle, avisará.
+
+- [ ] **Separador de miles.** `150.000€` se parsea como **0.0**: el patrón
+      `\b(\d{3,})\s*€` captura «000» del grupo de miles. Es el formato normal
+      de precio en España, así que probablemente afecte a datos reales.
+- [ ] **Coma decimal.** `€ 1.234,56` **no se detecta como activo**: el patrón de
+      pista de precio exige dos dígitos justo tras el `€`, y aquí hay uno.
+- [ ] **Puja mínima sin decimales.** `Puja mínima: 800€` se ignora porque
+      `RE_PUJA` exige separador decimal, y `price_min` acaba igualando a
+      `price_initial`.
+
 ## Pendiente
 
-- [ ] **`gunicorn` y despliegue.** `api.py` usa `app.run(debug=True)`, el
-      servidor de desarrollo de Flask. Falta `Procfile`/`render.yaml`.
-- [ ] **Separar `requirements.txt`** de `requirements-dev.txt`: la imagen de
-      producción instala `pytest` y `pytest-cov`.
-- [ ] **Linters reales** (`ruff`, `eslint`): el job `lint-check` del CI solo
-      comprueba con `ls` que existan ficheros.
+- [ ] **Formateo automático.** `ruff format` reformatearía 14 ficheros. Se dejó
+      fuera para no mezclar un diff puramente estético con los cambios de fondo;
+      el linter sí está en CI.
+- [ ] **`package-lock.json` está en `.gitignore`**, así que el `npm install` del
+      CI no es reproducible entre ejecuciones.
 - [ ] **Inconsistencia del timestamp en la API.** `api.py` (endpoint de
       duplicados) añade `"Z"` al `timestamp` y los otros cinco endpoints no.
       Corregirlo altera la respuesta, así que queda como decisión de API.
@@ -182,8 +229,10 @@ regresión.
 
 ```bash
 make bench                  # rendimiento (backend + frontend)
-cd backend && pytest        # 465 tests, gate de cobertura al 98%
+cd backend && pytest        # 465 tests + 3 xfail, gate de cobertura al 98%
 cd frontend && npm test     # 217 tests
+make lint                   # ruff + eslint, sin hallazgos
+make prod-run               # arranca con gunicorn como en producción
 ```
 
 Tests que sostienen las optimizaciones más delicadas:

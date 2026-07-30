@@ -1,5 +1,6 @@
-from typing import List, Dict, Optional, Any
 import re
+from typing import Any
+
 from bs4 import BeautifulSoup
 
 from .timeutils import utc_now
@@ -94,7 +95,7 @@ class AssetParser:
     def __init__(self):
         self.parser = DEFAULT_PARSER
 
-    def parse_response(self, html_content: str) -> List[Dict[str, Any]]:
+    def parse_response(self, html_content: str) -> list[dict[str, Any]]:
         """
         Parse HTML response from SSSS portal and extract assets
 
@@ -156,7 +157,7 @@ class AssetParser:
         lowered = text.lower()
         return any(keyword in lowered for keyword in ASSET_KEYWORDS)
 
-    def _extract_asset_data(self, item, full_soup: BeautifulSoup) -> Optional[Dict[str, Any]]:
+    def _extract_asset_data(self, item, full_soup: BeautifulSoup) -> dict[str, Any] | None:
         """Extract asset data from item element"""
         asset = {}
 
@@ -190,7 +191,7 @@ class AssetParser:
     # keep the element-based API for callers that hold only an element.
     # ------------------------------------------------------------------
 
-    def _id_from(self, text: str, element) -> Optional[str]:
+    def _id_from(self, text: str, element) -> str | None:
         """Extract unique ID from text, falling back to element attributes"""
         # Try data-id attribute
         if element.has_attr("data-id"):
@@ -260,8 +261,7 @@ class AssetParser:
                 groups = match.groups()
                 if len(groups) >= 2:
                     return float(f"{groups[0]}.{groups[1]}")
-                else:
-                    return float(groups[0].replace(".", ""))
+                return float(groups[0].replace(".", ""))
 
         return 0.0
 
@@ -276,15 +276,14 @@ class AssetParser:
                 if len(groups[0]) == 4:
                     # Already YYYY-MM-DD format
                     return f"{groups[0]}-{groups[1]:>02}-{groups[2]:>02}"
-                else:
-                    # DD/MM/YYYY format
-                    day, month, year = groups
-                    return f"{year}-{month:>02}-{day:>02}"
+                # DD/MM/YYYY format
+                day, month, year = groups
+                return f"{year}-{month:>02}-{day:>02}"
 
         # Default to today
         return utc_now().strftime("%Y-%m-%d")
 
-    def _location_from(self, text: str) -> Optional[str]:
+    def _location_from(self, text: str) -> str | None:
         """Extract location from text"""
         # Look for common location patterns
         for pattern in RE_LOCATIONS:
@@ -298,7 +297,7 @@ class AssetParser:
     # Element-based wrappers
     # ------------------------------------------------------------------
 
-    def _extract_id(self, element) -> Optional[str]:
+    def _extract_id(self, element) -> str | None:
         """Extract unique ID from asset element"""
         return self._id_from(element.get_text(), element)
 
@@ -318,11 +317,11 @@ class AssetParser:
         """Extract subasta date from element"""
         return self._date_from(element.get_text())
 
-    def _extract_location(self, element) -> Optional[str]:
+    def _extract_location(self, element) -> str | None:
         """Extract location from element"""
         return self._location_from(element.get_text())
 
-    def _validate_asset(self, asset: Dict[str, Any]) -> bool:
+    def _validate_asset(self, asset: dict[str, Any]) -> bool:
         """Validate that asset has required fields"""
         required = ["id", "description", "date_subasta"]
 
@@ -330,7 +329,7 @@ class AssetParser:
             field in asset and asset[field] for field in required
         )
 
-    def normalize_asset(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+    def normalize_asset(self, raw_data: dict[str, Any]) -> dict[str, Any]:
         """Normalize raw asset data"""
         description = str(raw_data.get("description", "")).strip()
         # Cap description at 500 characters

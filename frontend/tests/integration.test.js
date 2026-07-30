@@ -212,27 +212,23 @@ describe('Frontend-Backend Integration Tests', () => {
                 statusText: 'Internal Server Error',
             });
 
-            try {
-                await searchModule.search('test');
-                fail('Should have thrown an error');
-            } catch (error) {
-                expect(error.message).toContain('API error');
-                uiModule.showError(error.message);
-                const errorDiv = document.querySelector('.error-message');
-                expect(errorDiv).not.toBeNull();
-            }
+            // rejects.toThrow states the expectation directly. The previous
+            // fail() is not a Jest global since v27, and its ReferenceError
+            // would have been swallowed by the catch below.
+            await expect(searchModule.search('test')).rejects.toThrow('API error');
+
+            uiModule.showError('API error: 500 Internal Server Error');
+            expect(document.querySelector('.error-message')).not.toBeNull();
         });
 
         test('handles network failures', async () => {
             global.fetch.mockRejectedValueOnce(new Error('Network timeout'));
 
-            try {
-                await searchModule.search('test');
-                fail('Should have thrown an error');
-            } catch (error) {
-                expect(error.message).toContain('Failed to search assets');
-                uiModule.showError('Network error occurred');
-            }
+            await expect(searchModule.search('test')).rejects.toThrow(
+                'Failed to search assets'
+            );
+
+            uiModule.showError('Network error occurred');
         });
 
         test('handles invalid API response', async () => {

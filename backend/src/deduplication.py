@@ -3,10 +3,10 @@ Deduplication engine for AssetFinder
 Provides fuzzy matching and duplicate detection with weighted scoring
 """
 
-from typing import List, Dict, Tuple, Set, Any
+import logging
 from collections import deque
 from difflib import SequenceMatcher
-import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class _PreparedAsset:
     __slots__ = ("asset", "id", "cluster_key", "description", "location",
                  "location_parts", "type", "price")
 
-    def __init__(self, asset: Dict[str, Any]):
+    def __init__(self, asset: dict[str, Any]):
         self.asset = asset
         self.id = asset.get("id")
         # cluster_duplicates keys its graph with a "" default for absent ids.
@@ -36,7 +36,7 @@ class _PreparedAsset:
         self.location = location
         # Parts are deliberately not stripped: the original comparison split on
         # "," only, so "madrid, españa" yields {"madrid", " españa"}.
-        self.location_parts: Set[str] = set(location.split(",")) if location else set()
+        self.location_parts: set[str] = set(location.split(",")) if location else set()
 
         self.type = (asset.get("type") or "").lower().strip()
         self.price = asset.get("price_initial")
@@ -77,8 +77,8 @@ class DeduplicationEngine:
         self.confidence_threshold = confidence_threshold
 
     def find_duplicates(
-        self, asset: Dict, candidates: List[Dict]
-    ) -> List[Tuple[Dict, float]]:
+        self, asset: dict, candidates: list[dict]
+    ) -> list[tuple[dict, float]]:
         """
         Find potential duplicates for an asset.
 
@@ -110,7 +110,7 @@ class DeduplicationEngine:
         # Sort by score descending
         return sorted(scores, key=lambda x: x[1], reverse=True)
 
-    def calculate_similarity(self, asset1: Dict, asset2: Dict) -> float:
+    def calculate_similarity(self, asset1: dict, asset2: dict) -> float:
         """
         Calculate similarity score between two assets.
 
@@ -255,19 +255,19 @@ class DeduplicationEngine:
     # tests that score two raw assets directly.
     # ------------------------------------------------------------------
 
-    def _score_title_similarity(self, asset1: Dict, asset2: Dict) -> float:
+    def _score_title_similarity(self, asset1: dict, asset2: dict) -> float:
         """Score similarity of descriptions/titles (50% weight)"""
         return self._title_score(_PreparedAsset(asset1), _PreparedAsset(asset2))
 
-    def _score_price_similarity(self, asset1: Dict, asset2: Dict) -> float:
+    def _score_price_similarity(self, asset1: dict, asset2: dict) -> float:
         """Score similarity of prices (25% weight)"""
         return self._price_score(_PreparedAsset(asset1), _PreparedAsset(asset2))
 
-    def _score_location_similarity(self, asset1: Dict, asset2: Dict) -> float:
+    def _score_location_similarity(self, asset1: dict, asset2: dict) -> float:
         """Score similarity of locations (15% weight)"""
         return self._location_score(_PreparedAsset(asset1), _PreparedAsset(asset2))
 
-    def _score_type_similarity(self, asset1: Dict, asset2: Dict) -> float:
+    def _score_type_similarity(self, asset1: dict, asset2: dict) -> float:
         """Score similarity of asset types (10% weight)"""
         return self._type_score(_PreparedAsset(asset1), _PreparedAsset(asset2))
 
@@ -291,8 +291,8 @@ class DeduplicationEngine:
         return matcher.ratio()
 
     def cluster_duplicates(
-        self, assets: List[Dict]
-    ) -> List[List[Tuple[Dict, float]]]:
+        self, assets: list[dict]
+    ) -> list[list[tuple[dict, float]]]:
         """
         Cluster assets into groups of duplicates using graph-based approach.
 
@@ -308,7 +308,7 @@ class DeduplicationEngine:
         prepared = [_PreparedAsset(asset) for asset in assets]
 
         # Build similarity graph
-        graph: Dict[str, List[Tuple[str, float]]] = {p.cluster_key: [] for p in prepared}
+        graph: dict[str, list[tuple[str, float]]] = {p.cluster_key: [] for p in prepared}
         asset_dict = {p.cluster_key: p.asset for p in prepared}
 
         matcher = SequenceMatcher(None)
@@ -328,8 +328,8 @@ class DeduplicationEngine:
                     graph[p2.cluster_key].append((key1, score))
 
         # Find connected components (clusters)
-        visited: Set[str] = set()
-        clusters: List[List[Tuple[Dict, float]]] = []
+        visited: set[str] = set()
+        clusters: list[list[tuple[dict, float]]] = []
 
         for asset_id in graph:
             if asset_id not in visited:
@@ -342,10 +342,10 @@ class DeduplicationEngine:
     def _find_cluster(
         self,
         start_id: str,
-        graph: Dict[str, List[Tuple[str, float]]],
-        assets: Dict[str, Dict],
-        visited: Set[str],
-    ) -> List[Tuple[Dict, float]]:
+        graph: dict[str, list[tuple[str, float]]],
+        assets: dict[str, dict],
+        visited: set[str],
+    ) -> list[tuple[dict, float]]:
         """
         Find a cluster of duplicates starting from a given asset ID using BFS.
 
@@ -369,7 +369,8 @@ class DeduplicationEngine:
                 cluster.append((assets[current_id], 1.0))
 
             # Add connected neighbors
-            for neighbor_id, score in graph.get(current_id, []):
+            # The edge score is not needed here, only connectivity.
+            for neighbor_id, _score in graph.get(current_id, []):
                 if neighbor_id not in visited:
                     visited.add(neighbor_id)
                     queue.append(neighbor_id)
@@ -377,8 +378,8 @@ class DeduplicationEngine:
         return cluster
 
     def get_duplicate_summary(
-        self, asset: Dict, duplicates: List[Tuple[Dict, float]]
-    ) -> Dict:
+        self, asset: dict, duplicates: list[tuple[dict, float]]
+    ) -> dict:
         """
         Generate a summary of duplicate information.
 

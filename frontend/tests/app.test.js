@@ -145,7 +145,7 @@ describe('App Class', () => {
                 })),
             });
 
-            const form = document.getElementById('searchForm');
+            document.getElementById('searchForm');
             const event = new Event('submit');
             event.preventDefault = jest.fn();
 
@@ -170,7 +170,7 @@ describe('App Class', () => {
                 })),
             });
 
-            const form = document.getElementById('searchForm');
+            document.getElementById('searchForm');
             const event = new Event('submit');
             event.preventDefault = jest.fn();
 
@@ -202,7 +202,7 @@ describe('App Class', () => {
                 })),
             });
 
-            const form = document.getElementById('searchForm');
+            document.getElementById('searchForm');
             const event = new Event('submit');
             event.preventDefault = jest.fn();
 
@@ -226,7 +226,7 @@ describe('App Class', () => {
                 })),
             });
 
-            const form = document.getElementById('searchForm');
+            document.getElementById('searchForm');
             const event = new Event('submit');
             event.preventDefault = jest.fn();
 

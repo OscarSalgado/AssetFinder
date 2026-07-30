@@ -4,7 +4,6 @@ import { UIModule } from '../public/js/ui.js';
 describe('End-to-End Application Flow', () => {
     let searchModule;
     let uiModule;
-    let form;
     let queryInput;
     let typeSelect;
     let priceMinInput;
@@ -69,7 +68,6 @@ describe('End-to-End Application Flow', () => {
         uiModule = new UIModule();
 
         // Get DOM references
-        form = document.getElementById('searchForm');
         queryInput = document.getElementById('query');
         typeSelect = document.getElementById('type');
         priceMinInput = document.getElementById('priceMin');

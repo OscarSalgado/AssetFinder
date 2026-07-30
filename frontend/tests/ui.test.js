@@ -2,7 +2,6 @@ import { UIModule } from '../public/js/ui.js';
 
 describe('UIModule', () => {
     let uiModule;
-    let container;
 
     beforeEach(() => {
         // Create a mock DOM structure

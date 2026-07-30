@@ -1,10 +1,11 @@
-import pytest
-import tempfile
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-from src.db import Database, ASSET_COLUMNS, HISTORY_COLUMNS
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from src.db import ASSET_COLUMNS, HISTORY_COLUMNS, Database
 
 
 class TestDatabase:
@@ -24,7 +25,7 @@ class TestDatabase:
 
     def test_init_creates_database(self, db_path):
         """Test that __init__ creates database file"""
-        db = Database(db_path)
+        Database(db_path)
         assert Path(db_path).exists()
 
     def test_init_creates_tables(self, db):
@@ -1055,7 +1056,7 @@ class TestTimestampFormat:
         db.insert_asset(mock_asset)
 
         created = datetime.fromisoformat(db.get_asset("TEST-001")["created_at"])
-        delta = abs((datetime.now(timezone.utc).replace(tzinfo=None) - created).total_seconds())
+        delta = abs((datetime.now(UTC).replace(tzinfo=None) - created).total_seconds())
 
         assert delta < 60
 

@@ -1,0 +1,6 @@
+# Development and CI dependencies. Installs the runtime set too.
+-r requirements.txt
+
+pytest==7.4.2
+pytest-cov==4.1.0
+ruff==0.14.5

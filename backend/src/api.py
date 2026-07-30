@@ -1,13 +1,14 @@
-from flask import Flask, request, jsonify, Response, stream_with_context
-from typing import Tuple
 import csv
 import gzip
 import io
 import logging
+import os
+
+from flask import Flask, Response, jsonify, request, stream_with_context
 
 from .db import Database
-from .scraper import create_scraper
 from .deduplication import DeduplicationEngine
+from .scraper import create_scraper
 from .security import SecurityHeaders, rate_limiter
 from .timeutils import utc_now_isoformat
 
@@ -26,6 +27,7 @@ app.config["JSON_SORT_KEYS"] = False
 MAX_QUERY_LENGTH = 1000
 MAX_EXPORT_ROWS = 50000
 MAX_ASSET_ID_LENGTH = 100
+VALID_ASSET_TYPES = ("inmueble", "vehiculo", "mueble", "otros")
 
 # Response compression
 COMPRESSION_MIN_BYTES = 1024
@@ -52,8 +54,10 @@ EXPORT_FIELDNAMES = [
 MAX_DUPLICATE_CANDIDATES = 5000
 DUPLICATE_CONFIDENCE_THRESHOLD = 0.8
 
-# Initialize database and scraper
-db = Database()
+# Initialize database and scraper. The path is configurable so a deployment can
+# point at a mounted volume instead of the repository working directory.
+DB_PATH = os.environ.get("ASSETFINDER_DB", "data/assetfinder.db")
+db = Database(DB_PATH)
 scraper = create_scraper(use_mock=True, db=db)
 
 
@@ -88,7 +92,7 @@ def before_request():
         return response, 429
 
     if _db_initialized:
-        return
+        return None
 
     try:
         _initialize_database()
@@ -157,7 +161,7 @@ def _compress_response(response):
 
 
 @app.route("/api/health", methods=["GET"])
-def health_check() -> Tuple[dict, int]:
+def health_check() -> tuple[dict, int]:
     """Health check endpoint"""
     try:
         return (
@@ -181,7 +185,7 @@ def health_check() -> Tuple[dict, int]:
 
 
 @app.route("/api/search", methods=["GET"])
-def search_assets() -> Tuple[dict, int]:
+def search_assets() -> tuple[dict, int]:
     """
     Search assets endpoint
 
@@ -217,9 +221,9 @@ def search_assets() -> Tuple[dict, int]:
         # Build filters dict
         filters = {}
 
-        if type_filter := request.args.get("type"):
-            if type_filter in ["inmueble", "vehiculo", "mueble", "otros"]:
-                filters["type"] = type_filter
+        # An unrecognised type is ignored rather than rejected.
+        if (type_filter := request.args.get("type")) and type_filter in VALID_ASSET_TYPES:
+            filters["type"] = type_filter
 
         if price_min := request.args.get("price_min"):
             try:
@@ -294,7 +298,7 @@ def search_assets() -> Tuple[dict, int]:
 
 
 @app.route("/api/assets/<asset_id>", methods=["GET"])
-def get_asset(asset_id: str) -> Tuple[dict, int]:
+def get_asset(asset_id: str) -> tuple[dict, int]:
     """Get specific asset by ID"""
     try:
         asset = db.get_asset(asset_id)
@@ -327,7 +331,7 @@ def get_asset(asset_id: str) -> Tuple[dict, int]:
 
 
 @app.route("/api/sync", methods=["POST"])
-def sync_assets() -> Tuple[dict, int]:
+def sync_assets() -> tuple[dict, int]:
     """Sync assets from portal to database"""
     try:
         logger.info("Starting asset sync")
@@ -353,7 +357,7 @@ def sync_assets() -> Tuple[dict, int]:
 
 
 @app.route("/api/search-history", methods=["GET"])
-def get_search_history() -> Tuple[dict, int]:
+def get_search_history() -> tuple[dict, int]:
     """Get search history"""
     try:
         limit = min(int(request.args.get("limit", 50)), 1000)
@@ -394,7 +398,7 @@ def get_search_history() -> Tuple[dict, int]:
 
 
 @app.route("/api/export", methods=["GET"])
-def export_assets() -> Tuple[Response, int]:
+def export_assets() -> tuple[Response, int]:
     """
     Export search results to CSV
 
@@ -423,9 +427,9 @@ def export_assets() -> Tuple[Response, int]:
         sort_order = request.args.get("sort_order", "DESC").upper()
 
         filters = {}
-        if type_filter := request.args.get("type"):
-            if type_filter in ["inmueble", "vehiculo", "mueble", "otros"]:
-                filters["type"] = type_filter
+        # An unrecognised type is ignored rather than rejected.
+        if (type_filter := request.args.get("type")) and type_filter in VALID_ASSET_TYPES:
+            filters["type"] = type_filter
 
         if price_min := request.args.get("price_min"):
             try:
@@ -544,7 +548,7 @@ def export_assets() -> Tuple[Response, int]:
 
 
 @app.route("/api/duplicates", methods=["GET"])
-def find_duplicates() -> Tuple[dict, int]:
+def find_duplicates() -> tuple[dict, int]:
     """Find potential duplicates for an asset"""
     try:
         asset_id = request.args.get("asset_id", "").strip()
@@ -653,4 +657,15 @@ def create_app(db_path: str = "data/assetfinder.db"):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    # Development entrypoint only. Production runs through a WSGI server
+    # (see wsgi.py and the Procfile).
+    #
+    # debug defaults to off and is opt-in through the environment: the Werkzeug
+    # debugger executes arbitrary code from the browser, so enabling it on a
+    # reachable interface is a remote code execution hole. For the same reason
+    # the default bind address is loopback rather than 0.0.0.0.
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", 5000))
+
+    app.run(debug=debug, host=host, port=port)

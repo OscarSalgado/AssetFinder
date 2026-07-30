@@ -109,7 +109,7 @@ describe('App Integration', () => {
         const uiModule = new UIModule();
 
         uiModule.showLoading(true);
-        let indicator = document.getElementById('loadingIndicator');
+        const indicator = document.getElementById('loadingIndicator');
         expect(indicator.style.display).toBe('inline');
 
         uiModule.showLoading(false);
@@ -366,7 +366,7 @@ describe('App Class Tests', () => {
         document.getElementById('query').value = 'test';
         app.currentPage = 5;
 
-        const form = document.getElementById('searchForm');
+        document.getElementById('searchForm');
         const event = new Event('submit');
         event.preventDefault = jest.fn();
 

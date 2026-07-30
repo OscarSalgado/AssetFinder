@@ -1,0 +1,28 @@
+line-length = 100
+target-version = "py311"
+
+exclude = ["venv", "htmlcov", ".pytest_cache"]
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes: undefined names, unused imports and variables
+    "W",    # pycodestyle warnings
+    "I",    # import ordering
+    "B",    # flake8-bugbear: likely bugs
+    "C4",   # comprehension simplifications
+    "UP",   # pyupgrade: outdated constructs
+    "SIM",  # simplifications
+    "RET",  # return-statement hygiene
+]
+
+ignore = [
+    "E501",  # line length is enforced by the formatter, not as an error
+]
+
+[lint.per-file-ignores]
+# Tests deliberately reach into private helpers and repeat fixture boilerplate.
+"tests/*" = ["B011", "SIM117"]
+
+[format]
+quote-style = "double"

@@ -1,4 +1,4 @@
-.PHONY: help setup backend-setup frontend-setup test backend-test frontend-test coverage backend-coverage frontend-coverage clean install-hooks openspec-show openspec-check openspec-delta
+.PHONY: help setup backend-setup frontend-setup test backend-test frontend-test coverage backend-coverage frontend-coverage lint backend-lint frontend-lint bench bench-backend bench-frontend prod-run clean install-hooks openspec-show openspec-check openspec-delta
 
 help:
 	@echo "AssetFinder Development Commands"
@@ -20,8 +20,13 @@ help:
 	@echo "  make frontend-test      - Tests frontend con cobertura"
 	@echo "  make coverage           - Ver reporte de cobertura completo"
 	@echo ""
+	@echo "Calidad:"
+	@echo "  make lint               - ruff (backend) + eslint (frontend)"
+	@echo "  make bench              - Benchmark de rendimiento"
+	@echo ""
 	@echo "Development:"
-	@echo "  make backend-run        - Ejecutar API Flask"
+	@echo "  make backend-run        - Ejecutar API Flask (desarrollo)"
+	@echo "  make prod-run           - Ejecutar con gunicorn (como producción)"
 	@echo "  make frontend-serve     - Servir frontend localmente"
 	@echo ""
 	@echo "Maintenance:"
@@ -34,8 +39,8 @@ setup: backend-setup frontend-setup
 backend-setup:
 	@echo "Setting up backend..."
 	cd backend && python -m venv venv
-	cd backend && . venv/bin/activate && pip install -r requirements.txt
-	@echo "✓ Backend setup completado"
+	cd backend && . venv/bin/activate && pip install -r requirements-dev.txt
+	@echo "✓ Backend setup completado (runtime + pytest + ruff)"
 
 frontend-setup:
 	@echo "Setting up frontend..."
@@ -55,6 +60,22 @@ frontend-test:
 	@echo "Running frontend tests..."
 	cd frontend && npm test -- --coverage
 	@echo "✓ Frontend tests completados"
+
+lint: backend-lint frontend-lint
+	@echo ""
+	@echo "✓ Linters sin hallazgos"
+
+backend-lint:
+	@echo "ruff (backend)..."
+	cd backend && . venv/bin/activate && ruff check src/ tests/ bench.py wsgi.py gunicorn.conf.py
+
+frontend-lint:
+	@echo "eslint (frontend)..."
+	cd frontend && npx eslint public/js tests server.js bench.mjs
+
+prod-run:
+	@echo "Arrancando con gunicorn (configuración de producción)..."
+	cd backend && . venv/bin/activate && gunicorn --config gunicorn.conf.py wsgi:application
 
 bench: bench-backend bench-frontend
 	@echo ""

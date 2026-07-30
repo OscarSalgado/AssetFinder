@@ -1,8 +1,10 @@
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from requests.exceptions import RequestException
-from src.scraper import Scraper, create_scraper, MOCK_ASSETS
+
 from src.db import Database
+from src.scraper import MOCK_ASSETS, Scraper, create_scraper
 
 
 class TestScraper:

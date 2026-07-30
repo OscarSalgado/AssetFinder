@@ -1,8 +1,9 @@
-import sqlite3
 import json
+import sqlite3
 import threading
+from collections.abc import Iterable
 from pathlib import Path
-from typing import List, Dict, Optional, Any, Iterable
+from typing import Any
 
 from .timeutils import utc_now_isoformat
 
@@ -160,10 +161,10 @@ class Database:
             conn.commit()
             return True
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to create tables: {e}")
+            raise RuntimeError(f"Failed to create tables: {e}") from e
 
     @staticmethod
-    def _asset_row(asset: Dict[str, Any], now: str) -> tuple:
+    def _asset_row(asset: dict[str, Any], now: str) -> tuple:
         """Build the INSERT parameter tuple for an asset, validating it first."""
         for field in REQUIRED_ASSET_FIELDS:
             if field not in asset:
@@ -181,7 +182,7 @@ class Database:
             now,
         )
 
-    def insert_asset(self, asset: Dict[str, Any]) -> str:
+    def insert_asset(self, asset: dict[str, Any]) -> str:
         """Insert or replace asset in database"""
         conn = self._shared_connection()
         try:
@@ -201,9 +202,9 @@ class Database:
             conn.commit()
             return asset.get("id")
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to insert asset: {e}")
+            raise RuntimeError(f"Failed to insert asset: {e}") from e
 
-    def insert_assets(self, assets: Iterable[Dict[str, Any]]) -> int:
+    def insert_assets(self, assets: Iterable[dict[str, Any]]) -> int:
         """
         Insert or replace many assets in a single transaction.
 
@@ -234,9 +235,9 @@ class Database:
             conn.commit()
             return len(rows)
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to insert assets: {e}")
+            raise RuntimeError(f"Failed to insert assets: {e}") from e
 
-    def get_asset(self, asset_id: str) -> Optional[Dict[str, Any]]:
+    def get_asset(self, asset_id: str) -> dict[str, Any] | None:
         """Get asset by ID"""
         conn = self._shared_connection()
         try:
@@ -245,17 +246,17 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else None
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to get asset: {e}")
+            raise RuntimeError(f"Failed to get asset: {e}") from e
 
     def search_assets(
         self,
-        query: Optional[str] = None,
-        filters: Optional[Dict[str, Any]] = None,
+        query: str | None = None,
+        filters: dict[str, Any] | None = None,
         limit: int = 100,
         offset: int = 0,
         sort_by: str = "date_subasta",
         sort_order: str = "DESC",
-    ) -> tuple[List[Dict[str, Any]], int]:
+    ) -> tuple[list[dict[str, Any]], int]:
         """Search assets with optional filters, pagination, and sorting"""
         conn = self._shared_connection()
         try:
@@ -281,7 +282,7 @@ class Database:
 
             return [dict(row) for row in rows], total
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to search assets: {e}")
+            raise RuntimeError(f"Failed to search assets: {e}") from e
 
     @staticmethod
     def _validate_sort(sort_by: str, sort_order: str) -> tuple[str, str]:
@@ -298,7 +299,7 @@ class Database:
 
     @staticmethod
     def _build_search_where(
-        query: Optional[str], filters: Optional[Dict[str, Any]]
+        query: str | None, filters: dict[str, Any] | None
     ) -> tuple[str, list]:
         """
         Build the WHERE clause and parameters shared by search and export.
@@ -343,12 +344,12 @@ class Database:
 
     def iter_search_assets(
         self,
-        query: Optional[str] = None,
-        filters: Optional[Dict[str, Any]] = None,
+        query: str | None = None,
+        filters: dict[str, Any] | None = None,
         limit: int = 100,
         sort_by: str = "date_subasta",
         sort_order: str = "DESC",
-    ) -> Iterable[Dict[str, Any]]:
+    ) -> Iterable[dict[str, Any]]:
         """
         Yield matching assets one at a time instead of building a list.
 
@@ -374,10 +375,10 @@ class Database:
             for row in cursor:
                 yield dict(row)
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to search assets: {e}")
+            raise RuntimeError(f"Failed to search assets: {e}") from e
 
     def add_search_history(
-        self, query: str, filters: Optional[Dict[str, Any]], result_count: int
+        self, query: str, filters: dict[str, Any] | None, result_count: int
     ) -> int:
         """Log search query to history"""
         conn = self._shared_connection()
@@ -397,7 +398,7 @@ class Database:
             conn.commit()
             row_id = cursor.lastrowid
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to add search history: {e}")
+            raise RuntimeError(f"Failed to add search history: {e}") from e
 
         # Amortised: one prune every HISTORY_PRUNE_INTERVAL inserts.
         self._history_inserts_since_prune += 1
@@ -406,7 +407,7 @@ class Database:
 
         return row_id
 
-    def prune_search_history(self, keep: Optional[int] = None) -> int:
+    def prune_search_history(self, keep: int | None = None) -> int:
         """
         Drop the oldest history rows, keeping a rolling window.
 
@@ -441,11 +442,11 @@ class Database:
             conn.commit()
             return cursor.rowcount
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to prune search history: {e}")
+            raise RuntimeError(f"Failed to prune search history: {e}") from e
 
     def get_search_history(
         self, limit: int = 50, offset: int = 0
-    ) -> tuple[List[Dict[str, Any]], int]:
+    ) -> tuple[list[dict[str, Any]], int]:
         """Get search history with pagination"""
         conn = self._shared_connection()
         try:
@@ -475,7 +476,7 @@ class Database:
 
             return results, total
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to get search history: {e}")
+            raise RuntimeError(f"Failed to get search history: {e}") from e
 
     def delete_all_assets(self) -> bool:
         """Delete all assets (for testing only)"""
@@ -486,7 +487,7 @@ class Database:
             conn.commit()
             return True
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to delete assets: {e}")
+            raise RuntimeError(f"Failed to delete assets: {e}") from e
 
     def get_asset_count(self) -> int:
         """Get total number of assets"""
@@ -496,4 +497,4 @@ class Database:
             cursor.execute("SELECT COUNT(*) FROM assets")
             return cursor.fetchone()[0]
         except sqlite3.Error as e:
-            raise RuntimeError(f"Failed to get asset count: {e}")
+            raise RuntimeError(f"Failed to get asset count: {e}") from e

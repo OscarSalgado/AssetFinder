@@ -1,11 +1,11 @@
-from typing import List, Dict, Optional, Any
+from typing import Any
+
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .parser import AssetParser
 from .timeutils import utc_now, utc_now_isoformat
-
 
 # Mock data for fallback (Delta 0.2 compatibility)
 MOCK_ASSETS = [
@@ -102,10 +102,10 @@ class Scraper:
 
     def fetch_assets(
         self,
-        query: Optional[str] = None,
-        filters: Optional[Dict[str, Any]] = None,
+        query: str | None = None,
+        filters: dict[str, Any] | None = None,
         save_to_db: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Fetch assets from portal using real scraping or mock data
 
@@ -141,8 +141,8 @@ class Scraper:
         return results
 
     def _fetch_mock_assets(
-        self, query: Optional[str], filters: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
+        self, query: str | None, filters: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         """Fetch mock assets (Delta 0.2 compatibility)"""
         results = MOCK_ASSETS
 
@@ -200,8 +200,8 @@ class Scraper:
         return [dict(asset) for asset in results]
 
     def _fetch_real_assets(
-        self, query: Optional[str], filters: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
+        self, query: str | None, filters: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         """Fetch real assets from SSSS portal by scraping HTML"""
         try:
             # Build search URL with parameters
@@ -215,16 +215,14 @@ class Scraper:
                 return self._fetch_mock_assets(query, filters)
 
             # Parse HTML to extract assets
-            assets = self.parser.parse_response(html_content)
-
-            return assets
+            return self.parser.parse_response(html_content)
 
         except Exception:
             # Fallback to mock data on any error
             return self._fetch_mock_assets(query, filters)
 
     def _build_search_url(
-        self, query: Optional[str], filters: Dict[str, Any]
+        self, query: str | None, filters: dict[str, Any]
     ) -> str:
         """Build search URL with query parameters"""
         url = self.portal_url
@@ -243,7 +241,7 @@ class Scraper:
 
         return url
 
-    def _fetch_html(self, url: str) -> Optional[str]:
+    def _fetch_html(self, url: str) -> str | None:
         """Fetch HTML content from URL with error handling"""
         try:
             response = self.session.get(url, timeout=10)
@@ -252,7 +250,7 @@ class Scraper:
         except requests.RequestException:
             return None
 
-    def _persist(self, assets: List[Dict[str, Any]]) -> int:
+    def _persist(self, assets: list[dict[str, Any]]) -> int:
         """
         Write assets to the database in a single transaction.
 

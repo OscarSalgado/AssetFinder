@@ -1,0 +1,40 @@
+# Render blueprint: API backend plus the static frontend.
+# See https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: assetfinder-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && gunicorn --config gunicorn.conf.py wsgi:application
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      # The repository directory is not writable across restarts on the free
+      # plan, so the database lives on the mounted disk.
+      - key: ASSETFINDER_DB
+        value: /var/data/assetfinder.db
+      - key: GUNICORN_THREADS
+        value: "4"
+      # Never enable this in a deployed environment: the Werkzeug debugger
+      # executes arbitrary code from the browser.
+      - key: FLASK_DEBUG
+        value: "0"
+    disk:
+      name: assetfinder-data
+      mountPath: /var/data
+      sizeGB: 1
+
+  - type: web
+    name: assetfinder-frontend
+    runtime: static
+    plan: free
+    buildCommand: ""
+    staticPublishPath: frontend/public
+    routes:
+      # The frontend derives the API base URL from its own origin, so requests
+      # to /api must reach the backend service.
+      - type: rewrite
+        source: /api/*
+        destination: https://assetfinder-api.onrender.com/api/*

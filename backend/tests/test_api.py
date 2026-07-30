@@ -1,8 +1,10 @@
-import pytest
-from src.api import create_app
-from pathlib import Path
 import tempfile
-from unittest.mock import patch, MagicMock
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from src.api import create_app
 
 
 @pytest.fixture
@@ -196,7 +198,7 @@ class TestAssetDetailEndpoint:
 
     def test_get_asset_found(self, client, temp_db):
         """Test getting existing asset"""
-        from src.api import app, db
+        from src.api import db
 
         # Add a test asset to the database
         test_asset = {
@@ -380,9 +382,6 @@ class TestAPIErrorHandling:
         """Create Flask test client with mockable database"""
         from src import api
 
-        # Store original db
-        original_db = api.db
-
         # Create a new app
         app = create_app(temp_db)
         app.config["TESTING"] = True
@@ -507,7 +506,7 @@ class TestSyncEndpoint:
 
     def test_sync_endpoint_populates_database(self, client, temp_db):
         """Test that sync populates database"""
-        from src.api import app, db
+        from src.api import db
 
         response = client.post("/api/sync")
         assert response.status_code == 200
@@ -540,7 +539,7 @@ class TestDatabaseInitialization:
 
     def test_database_populated_after_first_request(self, client, temp_db):
         """Test database is populated after first request"""
-        from src.api import app, db
+        from src.api import db
 
         client.get("/api/search")
 
@@ -559,7 +558,6 @@ class TestDatabaseInitialization:
 
     def test_initialization_skipped_when_database_populated(self, client):
         """Test that initialization is skipped if database already has data"""
-        from src.api import app, db
 
         response1 = client.get("/api/search")
         data1 = response1.get_json()
@@ -989,6 +987,7 @@ class TestExportStreaming:
         """CSV built the old way: fully materialised in memory."""
         import csv as csv_module
         import io as io_module
+
         from src.api import EXPORT_FIELDNAMES
 
         output = io_module.StringIO()
@@ -1129,6 +1128,7 @@ class TestCompressionAndCaching:
         """Test a sizeable JSON body is gzipped"""
         import gzip as gzip_module
         import json as json_module
+
         import src.api as api_module
 
         api_module.db.insert_assets(self._big_catalogue())
@@ -1146,6 +1146,7 @@ class TestCompressionAndCaching:
         """Test the decompressed body is exactly the uncompressed one"""
         import gzip as gzip_module
         import json as json_module
+
         import src.api as api_module
 
         api_module.db.insert_assets(self._big_catalogue())
@@ -1164,6 +1165,7 @@ class TestCompressionAndCaching:
     def test_compression_shrinks_the_payload(self, client):
         """Test gzip actually reduces the transferred bytes"""
         import gzip as gzip_module
+
         import src.api as api_module
 
         api_module.db.insert_assets(self._big_catalogue())
@@ -1232,8 +1234,9 @@ class TestCompressionEdgeCases:
 
     def test_already_encoded_body_is_left_alone(self, client):
         """Test a response that declares an encoding is not double-compressed"""
-        import src.api as api_module
         from flask import Response
+
+        import src.api as api_module
 
         with api_module.app.test_request_context(
             "/api/search", headers={"Accept-Encoding": "gzip"}
@@ -1248,8 +1251,9 @@ class TestCompressionEdgeCases:
 
     def test_non_compressible_mimetype_is_left_alone(self, client):
         """Test binary payloads skip gzip"""
-        import src.api as api_module
         from flask import Response
+
+        import src.api as api_module
 
         with api_module.app.test_request_context(
             "/api/search", headers={"Accept-Encoding": "gzip"}
@@ -1264,8 +1268,9 @@ class TestCompressionEdgeCases:
 
     def test_streamed_response_is_left_alone(self, client):
         """Test the is_streamed guard protects the generator"""
-        import src.api as api_module
         from flask import Response
+
+        import src.api as api_module
 
         consumed = []
 

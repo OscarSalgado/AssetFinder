@@ -12,7 +12,7 @@
 import { JSDOM } from 'jsdom';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>');
-global.document = dom.window.document;
+const document = dom.window.document;
 
 const CARDS = 50;
 const REPS = 200;

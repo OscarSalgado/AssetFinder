@@ -1,9 +1,11 @@
 """Deduplication tests for AssetFinder"""
 
 import random
-import pytest
 from difflib import SequenceMatcher
 from unittest.mock import patch
+
+import pytest
+
 from src.deduplication import DeduplicationEngine
 
 
@@ -758,7 +760,8 @@ class TestOptimisationEquivalence:
             expected = reference.find_duplicates(target, assets)
 
             assert [a["id"] for a, _ in got] == [a["id"] for a, _ in expected]
-            for (_, got_score), (_, exp_score) in zip(got, expected):
+            # Lengths already asserted equal above, so strict is safe.
+            for (_, got_score), (_, exp_score) in zip(got, expected, strict=True):
                 assert got_score == pytest.approx(exp_score, abs=1e-12)
 
     @pytest.mark.parametrize("threshold", [0.5, 0.8, 0.95])
